@@ -1,0 +1,14 @@
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Never applicable here, but guard against accidental local config/secrets
+*.local.php
+settings.local.php
+
+# Defense-in-depth: settings.php should never live inside this repo,
+# but excluded explicitly in case the module is ever vendored differently
+settings.php

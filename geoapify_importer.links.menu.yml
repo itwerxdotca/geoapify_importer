@@ -1,0 +1,5 @@
+geoapify_importer.settings:
+  title: 'Geoapify Importer'
+  description: 'Configure Geoapify API access and importer settings.'
+  parent: system.admin_config_services
+  route_name: geoapify_importer.settings

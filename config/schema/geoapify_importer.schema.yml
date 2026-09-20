@@ -1,0 +1,7 @@
+geoapify_importer.settings:
+  type: config_object
+  label: 'Geoapify Importer settings'
+  mapping:
+   api_key:
+     type: string
+     label: 'Geoapify API key'

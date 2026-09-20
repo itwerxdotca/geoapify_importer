@@ -1,0 +1,12 @@
+services:
+  geoapify_importer.client:
+    class: Drupal\geoapify_importer\Service\GeoapifyClient
+    arguments: ['@http_client', '@logger.channel.geoapify_importer', '@state']
+
+  geoapify_importer.source_writer:
+    class: Drupal\geoapify_importer\Service\SourceFileWriter
+    arguments: ['@file_system', '@logger.channel.geoapify_importer']
+
+  logger.channel.geoapify_importer:
+    parent: logger.channel_base
+    arguments: ['geoapify_importer']

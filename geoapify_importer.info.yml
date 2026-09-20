@@ -1,0 +1,6 @@
+name: 'Geoapify Importer'
+type: module
+description: 'Imports and synchronizes geographic place data from the Geoapify Places API.'
+package: 'Towns Canada'
+core_version_requirement: '^11 || ^12'
+php: '8.4'

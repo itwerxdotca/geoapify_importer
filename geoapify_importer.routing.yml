@@ -1,0 +1,7 @@
+geoapify_importer.settings:
+  path: '/admin/config/services/geoapify-importer'
+  defaults:
+    _form: '\Drupal\geoapify_importer\Form\GeoapifyImporterSettingsForm'
+    _title: 'Geoapify Importer'
+  requirements:
+    _permission: 'administer site configuration'
