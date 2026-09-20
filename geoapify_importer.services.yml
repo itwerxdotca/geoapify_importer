@@ -7,6 +7,10 @@ services:
     class: Drupal\geoapify_importer\Service\SourceFileWriter
     arguments: ['@file_system', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.address_verifier:
+    class: Drupal\geoapify_importer\Service\AddressVerifier
+    arguments: ['@geoapify_importer.client', '@config.factory', '@logger.channel.geoapify_importer']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']

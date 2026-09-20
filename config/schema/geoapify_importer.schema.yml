@@ -2,6 +2,17 @@ geoapify_importer.settings:
   type: config_object
   label: 'Geoapify Importer settings'
   mapping:
-   api_key:
-     type: string
-     label: 'Geoapify API key'
+    api_key:
+      type: string
+      label: 'Geoapify API key'
+    reverse_geocode_enabled:
+      type: boolean
+      label: 'Enable reverse-geocode address verification fallback'
+    reverse_geocode_confidence_threshold:
+      type: float
+      label: 'Reverse-geocode building-level confidence threshold'
+    reverse_geocode_accepted_match_types:
+      type: sequence
+      label: 'Accepted reverse-geocode match types'
+      sequence:
+        type: string
