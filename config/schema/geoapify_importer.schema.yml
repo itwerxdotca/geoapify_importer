@@ -8,11 +8,3 @@ geoapify_importer.settings:
     reverse_geocode_enabled:
       type: boolean
       label: 'Enable reverse-geocode address verification fallback'
-    reverse_geocode_confidence_threshold:
-      type: float
-      label: 'Reverse-geocode building-level confidence threshold'
-    reverse_geocode_accepted_match_types:
-      type: sequence
-      label: 'Accepted reverse-geocode match types'
-      sequence:
-        type: string

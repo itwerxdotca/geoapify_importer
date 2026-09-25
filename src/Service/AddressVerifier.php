@@ -19,19 +19,25 @@ use Psr\Log\LoggerInterface;
  *      VERIFIED with no extra API call (this is the cheap, default path).
  *   2. Otherwise, if reverse-geocode fallback is enabled in configuration,
  *      call the Reverse Geocoding API against the place's coordinates and
- *      evaluate the returned `rank.match_type` / `rank.confidence_*`
- *      fields against configurable acceptance criteria.
- *   3. If fallback is disabled, or the reverse-geocode result doesn't meet
- *      the configured criteria, the result is UNVERIFIED and the caller
- *      should route the record to editorial review rather than treat the
+ *      check whether THAT response also contains both `housenumber` and
+ *      `street` — i.e. an independent, coordinate-based confirmation of
+ *      a genuine civic address, using the same signal as step 1.
+ *   3. If fallback is disabled, or the reverse-geocode result also lacks
+ *      a housenumber, the result is UNVERIFIED and the caller should
+ *      route the record to editorial review rather than treat the
  *      address/town data as authoritative.
  *
- * IMPORTANT: the exact field paths this class reads from a reverse-geocode
- * response (rank.match_type, rank.confidence_building_level) are based on
- * Geoapify's published documentation and have NOT yet been confirmed
- * against a live reverse-geocode API response in this project. Run a real
- * test call and compare against getMatchType()/getBuildingConfidence()
- * before relying on this in production. See project notes.
+ * NOTE: an earlier version of this class attempted to use
+ * `rank.match_type` and `rank.confidence_building_level` from the
+ * reverse-geocode response. Live testing (two real API calls, including
+ * a remote site with no civic address) confirmed the Reverse Geocoding
+ * endpoint does not return those fields at all — they are documented
+ * under Geoapify's Forward Geocoding and Address Autocomplete APIs,
+ * which match a *requested* address against candidates; Reverse
+ * Geocoding has no requested address to match against, so it has no
+ * match_type. The `reverse_geocode_confidence_threshold` and
+ * `reverse_geocode_accepted_match_types` config values were removed
+ * accordingly, since they had no real data to evaluate.
  */
 class AddressVerifier {
 
@@ -88,8 +94,7 @@ class AddressVerifier {
    *   - method: 'places_api', 'reverse_geocode', 'fallback_disabled',
    *     or 'reverse_geocode_error'.
    *   - details: array of supporting data for logging/debugging
-   *     (e.g. the match_type and confidence seen, if a fallback call
-   *     was made).
+   *     (e.g. the housenumber/street seen, if a fallback call was made).
    */
   public function verify(array $properties): array {
 	// Fast path: Places API already gave us a genuine civic address.
@@ -146,21 +151,17 @@ class AddressVerifier {
 	  ];
 	}
 
-	$match_type = $this->extractMatchType($reverse_result);
-	$confidence = $this->extractBuildingConfidence($reverse_result);
+	$result_housenumber = $reverse_result['results'][0]['housenumber'] ?? NULL;
+	$result_street = $reverse_result['results'][0]['street'] ?? NULL;
 
-	$accepted_match_types = (array) ($config->get('reverse_geocode_accepted_match_types') ?? []);
-	$threshold = (float) ($config->get('reverse_geocode_confidence_threshold') ?? 1.0);
+	$status = (!empty($result_housenumber) && !empty($result_street))
+	  ? self::STATUS_VERIFIED
+	  : self::STATUS_UNVERIFIED;
 
-	$meets_match_type = $match_type !== NULL && in_array($match_type, $accepted_match_types, TRUE);
-	$meets_confidence = $confidence !== NULL && $confidence >= $threshold;
-
-	$status = ($meets_match_type && $meets_confidence) ? self::STATUS_VERIFIED : self::STATUS_UNVERIFIED;
-
-	$this->logger->info('Reverse-geocode fallback for place_id @place_id: match_type=@match_type confidence=@confidence -> @status', [
+	$this->logger->info('Reverse-geocode fallback for place_id @place_id: housenumber=@housenumber street=@street -> @status', [
 	  '@place_id' => $properties['place_id'] ?? 'unknown',
-	  '@match_type' => $match_type ?? 'null',
-	  '@confidence' => $confidence ?? 'null',
+	  '@housenumber' => $result_housenumber ?? 'null',
+	  '@street' => $result_street ?? 'null',
 	  '@status' => $status,
 	]);
 
@@ -168,45 +169,10 @@ class AddressVerifier {
 	  'status' => $status,
 	  'method' => 'reverse_geocode',
 	  'details' => [
-		'match_type' => $match_type,
-		'confidence_building_level' => $confidence,
-		'threshold_used' => $threshold,
-		'accepted_match_types_used' => $accepted_match_types,
+		'housenumber' => $result_housenumber,
+		'street' => $result_street,
 	  ],
 	];
-  }
-
-  /**
-   * Extracts rank.match_type from a decoded reverse-geocode response.
-   *
-   * NOT YET VERIFIED against a real response — see class docblock.
-   * Adjust the array path here once a live response has been inspected,
-   * if it turns out to differ from Geoapify's documented shape.
-   *
-   * @param array $reverse_result
-   *   The decoded reverse-geocode API response.
-   *
-   * @return string|null
-   *   The match type, or NULL if not present.
-   */
-  protected function extractMatchType(array $reverse_result): ?string {
-	return $reverse_result['results'][0]['rank']['match_type'] ?? NULL;
-  }
-
-  /**
-   * Extracts rank.confidence_building_level from a reverse-geocode response.
-   *
-   * NOT YET VERIFIED against a real response — see class docblock.
-   *
-   * @param array $reverse_result
-   *   The decoded reverse-geocode API response.
-   *
-   * @return float|null
-   *   The confidence value (0–1), or NULL if not present.
-   */
-  protected function extractBuildingConfidence(array $reverse_result): ?float {
-	$value = $reverse_result['results'][0]['rank']['confidence_building_level'] ?? NULL;
-	return $value === NULL ? NULL : (float) $value;
   }
 
 }

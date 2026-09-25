@@ -96,46 +96,8 @@ class GeoapifyImporterSettingsForm extends ConfigFormBase {
 	  '#title' => $this->t('Enable reverse-geocode fallback'),
 	  '#default_value' => $config->get('reverse_geocode_enabled') ?? FALSE,
 	  '#description' => $this->t(
-		'When a place returned by the Geoapify Places API does not include a verified civic street address (no house number), the importer can optionally make a <strong>second, separate API call</strong> to the Geoapify Reverse Geocoding API to check whether that location independently resolves to a confident, verified address. If this check passes, the address and town are trusted automatically instead of being routed to editorial review. <strong>Enabling this will increase your Geoapify API usage and cost</strong>, since it adds one extra request for every place that does not already have a verified address from the initial Places API response. Leave this disabled to keep API usage to the minimum and send all unverified addresses to manual review instead.'
+		'When a place returned by the Geoapify Places API does not include a verified civic street address (no house number), the importer can optionally make a <strong>second, separate API call</strong> to the Geoapify Reverse Geocoding API to check whether that location independently resolves to a street address with a house number. If it does, the address and town are trusted automatically instead of being routed to editorial review. <strong>Enabling this will increase your Geoapify API usage and cost</strong>, since it adds one extra request for every place that does not already have a verified address from the initial Places API response. Leave this disabled to keep API usage to the minimum and send all unverified addresses to manual review instead.'
 	  ),
-	];
-
-	$form['reverse_geocode']['reverse_geocode_confidence_threshold'] = [
-	  '#type' => 'number',
-	  '#title' => $this->t('Minimum building-level confidence'),
-	  '#min' => 0,
-	  '#max' => 1,
-	  '#step' => 0.05,
-	  '#default_value' => $config->get('reverse_geocode_confidence_threshold') ?? 0.8,
-	  '#description' => $this->t('A value from 0 to 1. Reverse-geocode results scoring below this confidence will not be treated as verified, even if the match type below is accepted. Higher is stricter (fewer auto-approvals, more sent to review).'),
-	  '#states' => [
-		'visible' => [
-		  ':input[name="reverse_geocode_enabled"]' => ['checked' => TRUE],
-		],
-	  ],
-	];
-
-	$match_type_options = [
-	  'full_match' => $this->t('Full match'),
-	  'match_by_building' => $this->t('Match by building'),
-	  'match_by_street' => $this->t('Match by street'),
-	  'match_by_postcode' => $this->t('Match by postcode'),
-	  'match_by_city_or_disrict' => $this->t('Match by city or district'),
-	  'match_by_country_or_state' => $this->t('Match by country or state'),
-	  'inner_part' => $this->t('Inner part'),
-	];
-
-	$form['reverse_geocode']['reverse_geocode_accepted_match_types'] = [
-	  '#type' => 'checkboxes',
-	  '#title' => $this->t('Accepted match types'),
-	  '#options' => $match_type_options,
-	  '#default_value' => $config->get('reverse_geocode_accepted_match_types') ?? ['full_match', 'match_by_building'],
-	  '#description' => $this->t('Only reverse-geocode results with one of these checked match types (and meeting the confidence threshold above) are treated as verified. Stricter settings send more records to manual review; looser settings trust the fallback more but risk incorrect auto-approvals.'),
-	  '#states' => [
-		'visible' => [
-		  ':input[name="reverse_geocode_enabled"]' => ['checked' => TRUE],
-		],
-	  ],
 	];
 
 	return parent::buildForm($form, $form_state);
@@ -154,8 +116,6 @@ class GeoapifyImporterSettingsForm extends ConfigFormBase {
 
 	$this->config('geoapify_importer.settings')
 	  ->set('reverse_geocode_enabled', (bool) $form_state->getValue('reverse_geocode_enabled'))
-	  ->set('reverse_geocode_confidence_threshold', (float) $form_state->getValue('reverse_geocode_confidence_threshold'))
-	  ->set('reverse_geocode_accepted_match_types', array_values(array_filter($form_state->getValue('reverse_geocode_accepted_match_types'))))
 	  ->save();
 
 	parent::submitForm($form, $form_state);
