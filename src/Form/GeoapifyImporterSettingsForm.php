@@ -3,6 +3,7 @@
 namespace Drupal\geoapify_importer\Form;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Config\TypedConfigManagerInterface;
 use Drupal\Core\Form\ConfigFormBase;
 use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\State\StateInterface;
@@ -20,8 +21,8 @@ class GeoapifyImporterSettingsForm extends ConfigFormBase {
   /**
    * Constructs the settings form.
    */
-  public function __construct(ConfigFactoryInterface $config_factory, StateInterface $state) {
-	parent::__construct($config_factory);
+  public function __construct(ConfigFactoryInterface $config_factory, TypedConfigManagerInterface $typed_config_manager, StateInterface $state) {
+	parent::__construct($config_factory, $typed_config_manager);
 	$this->state = $state;
   }
 
@@ -31,6 +32,7 @@ class GeoapifyImporterSettingsForm extends ConfigFormBase {
   public static function create(ContainerInterface $container) {
 	return new static(
 	  $container->get('config.factory'),
+	  $container->get('config.typed'),
 	  $container->get('state')
 	);
   }
