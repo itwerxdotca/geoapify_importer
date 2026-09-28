@@ -14,28 +14,43 @@ The importer must be designed as a maintainable ingestion pipeline that can late
 
 - Drupal root: `/Users/ronmacquarrie/Sites/townscanada/public_html`
 - Custom module: `/Users/ronmacquarrie/Sites/townscanada/public_html/modules/custom/geoapify_importer`
-- Development is currently local.
 
-### Production
+### Production — CONFIRMED, live-verified this session
 
 - Drupal root: `/home/townscanada/public_html`
-- Do not make production changes while developing this module.
+- Drupal version: **11.4.7**
+- PHP version: **8.4.26** (`/usr/bin/php8.4`)
+- Drush version: **13.8.0.0** (matches local exactly)
+- DB driver: mysql
+- Install profile: standard
+- Private files path: `/home/townscanada/backup` — **OPEN ITEM:** this path's name suggests it may originally be a backup-specific directory that happens to also serve as `file_private_path`. Confirm this is intended as the general-purpose private filesystem location before deploying `geoapify_importer` there, since our raw source files would live alongside whatever else uses that path.
+- Access confirmed via SSH; all production checks performed this session were read-only (`drush php:eval` queries, `drush status`) — no writes made to production.
+- **Local and production versions match exactly.** No platform-mismatch risk identified.
 
 ### Drupal / PHP
 
-- Drupal 11.x
-- PHP 8.4+
+- Drupal 11.x (confirmed 11.4.7 on production)
+- PHP 8.4+ (confirmed 8.4.26 on production)
 - Must remain compatible with Drupal 12
 - Module requirement: `^11 || ^12`
-- There is NO `web/` directory in this Drupal installation. Configuration paths use `sites/default/...`, not `web/sites/default/....`
+- No `web/` directory in this Drupal installation. Configuration paths use `sites/default/...`.
 
 ## Version Control
 
-- Module is its own git repository, rooted at the module directory (not the full Drupal install).
+- Module is its own git repository, rooted at the module directory.
 - Public GitHub remote: `https://github.com/itwerxdotca/geoapify_importer`
-- Branch: `main`
-- Managed day-to-day via GitHub Desktop.
-- `.gitignore` excludes OS/editor cruft; no secrets are ever stored in module files (API key lives in Drupal State API, not config or code).
+- Branch: `main`, managed via GitHub Desktop.
+- `.gitignore` excludes OS/editor cruft; no secrets stored in module files.
+
+## IMPORTANT: Local vs. Production Data Divergence — CONFIRMED THIS SESSION
+
+**Local devtop and production do NOT share the same taxonomy content.** This was flagged by the project owner and is now confirmed as a real, structural fact of this project, not an assumption:
+
+- Local's taxonomy term IDs, and potentially term names/counts, differ from production's.
+- Any classification/mapping logic MUST query the live taxonomy on whichever environment it is running on at the time — it must NEVER rely on a static table of term IDs, or even a static table of term UUIDs built from one environment, since term *content* itself (which terms exist, what they're tagged with) can differ between environments, not just their internal IDs.
+- This is the deciding factor behind the "dynamic mapping" approach chosen this session (see Classification Engine section below) over a static config-file mapping table.
+
+**Production research was conducted this session** (read-only, via SSH + `drush php:eval` / `drush status`) specifically to stop building against assumptions and confirm real field structures. Findings are incorporated throughout this document. This should be the standard practice going forward: prefer confirming real production structure over extending assumptions built only against the local devtop.
 
 ## Module
 
@@ -50,49 +65,39 @@ geoapify_importer/
 │   └── schema/
 │       └── geoapify_importer.schema.yml
 ├── src/
+│   ├── Drush/
+│   │   └── Commands/
+│   │       └── GeoapifyImporterCommands.php
 │   ├── Form/
 │   │   └── GeoapifyImporterSettingsForm.php
 │   └── Service/
 │       ├── GeoapifyClient.php
 │       ├── SourceFileWriter.php
-│       └── AddressVerifier.php
+│       ├── AddressVerifier.php
+│       └── Poi/
+│           └── PoiCategoryClassifier.php
 ├── geoapify_importer.info.yml
 ├── geoapify_importer.services.yml
 ├── geoapify_importer.routing.yml
 └── geoapify_importer.links.menu.yml
 ```
 
-Note: `config/install/` from the original spec is not currently present as a tracked directory (git does not track empty directories); it can be added back if/when default config needs to ship with the module.
+Note the `Service/Poi/` subdirectory — introduced this session specifically to keep POI-specific classification logic separate from shared ingestion infrastructure (`GeoapifyClient`, `SourceFileWriter`, `AddressVerifier`), per the Architecture Goal.
 
 ## Source Data Architecture
 
-Raw source data is stored as **files**, not SQL.
-
-Pipeline:
+Raw source data is stored as **files**, not SQL. Pipeline (unchanged):
 
 ```
-Geoapify API
-	↓
-Raw source files
-	↓
-Classification / validation / change detection
-	↓
-Drupal taxonomy + POI fields
-	↓
-Drupal database
+Geoapify API → Raw source files → Classification/validation/change detection → Drupal taxonomy + fields → Drupal database
 ```
 
-- No custom SQL table is used for primary raw-data storage.
-- Raw source files are not stored inside the module code directory.
+### Private filesystem — RESOLVED (local); OPEN ITEM (production naming)
 
-### Private filesystem — RESOLVED
+- Local: `/Users/ronmacquarrie/Sites/townscanada/private`, configured and verified.
+- Production: `/home/townscanada/backup` — exists and is configured as `file_private_path`, but its name warrants confirmation before use (see Environment section above).
 
-- Local private filesystem path: `/Users/ronmacquarrie/Sites/townscanada/private`
-- Configured in `settings.php` via `$settings['file_private_path']`.
-- Verified working via `\Drupal\Core\StreamWrapper\PrivateStream::basePath()`.
-- Sits as a sibling to `public_html`, outside the webroot, outside the module, and (locally) outside any VCS, since no git repo wraps the Drupal install itself.
-
-### Source-file naming/partitioning strategy — RESOLVED
+### Source-file naming/partitioning strategy — RESOLVED, VERIFIED AT SCALE
 
 ```
 private://geoapify_importer/
@@ -103,234 +108,221 @@ private://geoapify_importer/
 │   │       └── {timestamp}.json
 ```
 
-- `{place_id}` is Geoapify's own opaque place ID (long encoded string), used verbatim as the directory name — intentional, matching the spec's preferred record-identity mechanism.
-- `{timestamp}` format: `gmdate('Ymd\THis\Z')`, e.g. `20260920T223039Z` (UTC, filesystem-safe, sortable as a string).
-- On each write: if a `latest.json` already exists for that place, it is archived into `history/{timestamp}.json` before the new payload is written.
-- Writes are atomic (write-to-temp, then rename) to avoid partial files.
+- `{place_id}`: Geoapify's own opaque place ID, used verbatim as directory name.
+- `{timestamp}`: `gmdate('Ymd\THis\Z')`.
+- Archive-on-rewrite confirmed working; atomic writes (temp + rename).
 
-**Implemented as:** `Drupal\geoapify_importer\Service\SourceFileWriter` (service ID `geoapify_importer.source_writer`).
+**Implemented as:** `Drupal\geoapify_importer\Service\SourceFileWriter` (`geoapify_importer.source_writer`). `write()` and `readLatest()` both verified against real Geoapify data, including a 7-feature batch fetch this session (see `geoapify:fetch` below).
 
-- `write(string $place_id, array $payload): string` — writes/archives as above, returns the URI written.
-- `readLatest(string $place_id): ?array` — returns the current payload, or `NULL` if none exists yet.
-
-**Verified end-to-end with live Geoapify data** (Fort McMurray museum search): write, archive-on-rewrite, and read-back all confirmed working against real API responses.
-
-**Known edge case, not yet addressed:** two writes to the same place within the same second would collide in `history/` (current behavior: throws, via `EXISTS_ERROR`, rather than silently overwriting — considered the safer default for now).
+**Known edge case, unaddressed:** same-second double-write to one place collides in `history/` (currently throws via `EXISTS_ERROR` — considered acceptably safe for now).
 
 ## API Authentication
 
-- Geoapify API key storage uses the Drupal State API.
-- State key: `geoapify_importer.api_key`
-- Not exported through config sync; not stored in Git.
-- Settings UI uses a password field; existing key is never displayed; UI shows whether a key is currently configured; leaving the field blank preserves the existing key.
-- No Key module dependency.
-- Confirmed intact and unaffected by this session's form/config changes (verified via `drush php:eval` presence check).
+Unchanged. State API key (`geoapify_importer.api_key`), password field UI, confirmed intact through all changes this session.
 
 ## Geoapify Client
 
-- Service: `geoapify_importer.client`
-- Class: `Drupal\geoapify_importer\Service\GeoapifyClient`
-- Constructor uses PHP 8 constructor-property-promotion: `ClientInterface $httpClient`, `LoggerInterface $logger`, `StateInterface $state`.
+- Service: `geoapify_importer.client`; class `Drupal\geoapify_importer\Service\GeoapifyClient`.
 
-### Places API — VERIFIED
+### Places API — VERIFIED, including at scale
 
-- Endpoint: `https://api.geoapify.com/v2/places` (class constant `PLACES_ENDPOINT`, `private const`)
-- Method: `request(array $query = []): array`
-- Required parameters, confirmed against Geoapify's own docs: `apiKey` and at least one `categories` value.
-- Spatial filter confirmed working: `filter=circle:lon,lat,radiusMeters` (rejects the previously-tried `filter=countrycode:ca` pattern, which is not a valid Places filter type).
-- Live-tested query (Fort McMurray, museums):
-  ```
-  categories=entertainment.museum
-  filter=circle:-111.3809,56.7264,5000
-  limit=5
-  ```
-  Returned a valid `FeatureCollection` with 2 real features (Heritage Village, Marine Park Museum), including `place_id`, full `properties`, and `geometry`.
+- Endpoint: `https://api.geoapify.com/v2/places` (`private const PLACES_ENDPOINT`).
+- `request(array $query = []): array`.
+- Required: `apiKey`, at least one `categories` value.
+- Spatial filter: `filter=circle:lon,lat,radiusMeters`.
+- **`limit` parameter confirmed against Geoapify's own docs: default 20, maximum 500.**
+- Live-tested this session at `limit=20` (returned 7 real features — see Classification Engine section for what those features revealed).
 
-### Reverse Geocoding API — implemented, NOT YET LIVE-VERIFIED
+### Reverse Geocoding API — VERIFIED AND CORRECTED THIS SESSION
 
-- Endpoint: `https://api.geoapify.com/v1/geocode/reverse` (class constant `REVERSE_GEOCODE_ENDPOINT`, `private const`)
-- Method: `reverseGeocode(float $lat, float $lon): array`
-- Confirmed against Geoapify docs: response includes `rank.confidence`, `rank.confidence_city_level`, `rank.confidence_street_level`, `rank.confidence_building_level` (each 0–1), and `rank.match_type` (values include `full_match`, `inner_part`, `match_by_building`, `match_by_street`, `match_by_postcode`, `match_by_city_or_disrict`, `match_by_country_or_state`).
-- **OPEN ITEM:** the exact array path used in `AddressVerifier` (`$result['results'][0]['rank']['match_type']`) is inferred from documentation only. A real `reverseGeocode()` test call has not yet been made in this project. Must be confirmed before this logic is trusted in production.
+- Endpoint: `https://api.geoapify.com/v1/geocode/reverse` (`private const REVERSE_GEOCODE_ENDPOINT`).
+- `reverseGeocode(float $lat, float $lon): array`.
+- **CORRECTED FINDING:** earlier assumption that this endpoint returns `rank.match_type` / `rank.confidence_building_level` was WRONG, confirmed via two real live calls (Marine Park Museum; Bitumount historic site). The actual `rank` object on Reverse Geocoding responses contains only `importance` and `popularity` — no match/confidence fields at all. Those fields are documented under Forward Geocoding and Address Autocomplete specifically (APIs that match a *requested* address against candidates); Reverse Geocoding has no requested address to match against, so it structurally cannot return them.
+- **Corrected design:** the fallback now checks for `housenumber` + `street` directly on the reverse-geocode result — the same signal already used for the primary Places API check. All config for the old (invalid) match_type/confidence approach was removed from schema, form, and stored config.
+- **Live-tested against a deliberately hard case:** Bitumount (a remote 1920s–1950s oil sands ruin, ~90km north of Fort McMurray) reverse-geocodes to `street: "True North Road"` but has **no `housenumber`** — correctly resolves to `UNVERIFIED`, confirming the rule correctly declines to fabricate a false-positive verified address for a remote landmark with no real civic address.
 
 ## Current Settings Route
 
-- Path: `/admin/config/services/geoapify-importer`
-- Route: `geoapify_importer.settings`
-- Permission: `administer site configuration`
-- Form class: `GeoapifyImporterSettingsForm`
+- Path: `/admin/config/services/geoapify-importer`; form class `GeoapifyImporterSettingsForm`.
 
-### Bugs found and fixed this session
+### Bugs found and fixed this session (see prior spec revision for full detail; summarized here)
 
-1. **Missing `ConfigFormBase` constructor call.** The form's constructor originally overrode the parent constructor entirely, injecting only `StateInterface` and never calling `parent::__construct()`. This left `$this->configFactory` unset, so any call to the inherited `$this->config()` helper would have fatally errored.
-2. **Drupal 11's `ConfigFormBase` requires two constructor arguments, not one.** Initial fix only passed `ConfigFactoryInterface` to `parent::__construct()`, which still fataled (`ArgumentCountError`) because Drupal 11 also requires `TypedConfigManagerInterface` (added in core 10.2+ for config validation). Fixed by injecting both `ConfigFactoryInterface` and `TypedConfigManagerInterface`, updating `create()` to pull `config.typed` from the container alongside `config.factory` and `state`.
-3. **`getEditableConfigNames()` returned an empty array**, appropriate only when the form touched no config objects (it previously only used State API). Updated to return `['geoapify_importer.settings']` now that the form owns real config.
+1. Missing `parent::__construct()` call to `ConfigFormBase` — fixed.
+2. Drupal 11's `ConfigFormBase` requires BOTH `ConfigFactoryInterface` AND `TypedConfigManagerInterface` — fixed; this fix was initially made locally but not committed/pushed until a follow-up round caught the discrepancy between what was running locally and what was on GitHub.
+3. `getEditableConfigNames()` was empty; now returns `['geoapify_importer.settings']`.
+4. **Dead config removed:** `reverse_geocode_confidence_threshold` and `reverse_geocode_accepted_match_types` were removed entirely from schema, form, and stored config (via `drush config:delete` + re-save), since they referenced fields that Reverse Geocoding never actually returns (see above).
 
-**Verified working:** form loads with no errors, submits successfully, and `drush config:get geoapify_importer.settings` returns the correct saved values:
+**Current config shape**, verified via `drush config:get`:
 ```
 reverse_geocode_enabled: false
-reverse_geocode_confidence_threshold: 0.8
-reverse_geocode_accepted_match_types:
-  - full_match
-  - match_by_building
 ```
 
-**Note:** the `geoapify_importer.settings` config object does not exist in the database until the settings form is submitted at least once — the schema only defines its shape, it doesn't create the object.
+## Point of Interest — CONFIRMED REAL PRODUCTION FIELDS
 
-## Initial Drupal Destination
-
-- Content type / bundle: `point_of_interest`
-- `point_of_interest` is the bundle machine name, not the entity type; config names follow `node.point_of_interest.field_name`.
-
-### Existing Point of Interest Fields
+Bundle: `point_of_interest`. Fields confirmed live on production this session (matches original spec and local devtop exactly):
 
 ```
-field_canadian_towns
-field_description
-field_hero_image
-field_meta_description
-field_poi_category
-field_poi_tags
-field_poi_location
-field_poi_address
+field_canadian_towns   (entity_reference -> canadian_towns taxonomy)
+field_description      (string_long)
+field_hero_image       (entity_reference -> image)
+field_poi_address      (address)
+field_poi_location     (geolocation)      <- NOTE: Geolocation module, not plain lat/lon
+field_poi_tags         (entity_reference -> tags)
+field_meta_description (string)
+field_poi_category     (entity_reference -> POI category taxonomy, 72 terms)
 ```
 
-### Geographic model
+**New implementation note (this session):** `field_poi_location` uses the **Geolocation module**, which expects a specific structure (lat/lng keyed), not a raw coordinate pair. The eventual POI-creation service will need a small transform step converting Geoapify's `geometry.coordinates` (`[lon, lat]` order) into the Geolocation module's expected field structure. Not yet implemented.
 
-- `field_poi_location` stores coordinates (primary geographic identity).
-- `field_poi_address` stores an optional Canadian street address (address module).
-- `field_canadian_towns` references the Canadian Towns taxonomy (province → town).
-- Remote/natural POIs may have no meaningful town reference.
-- Do not force Listings into an identical geographic model.
+### POI Address — clarified relationship (unchanged from prior revision)
 
-### POI Address — clarified relationship
+`field_canadian_towns` + `field_poi_address` are one logical address unit (town via taxonomy, remainder via address module), synced together, not independently. Verification-skip rule (housenumber+street, corrected this session) applies to this unit.
 
-`field_canadian_towns` and `field_poi_address` are **two parts of one logical address concept**, not independent fields:
-- `field_canadian_towns`: structured province→town component, via taxonomy.
-- `field_poi_address`: the remainder of the address (street, postal code, address lines), via the address module, with locality intentionally hidden because the taxonomy already owns that role.
+## Listing Content Type — NEWLY DOCUMENTED THIS SESSION (real production fields)
 
-This means the two fields must be treated as **one ownership/sync unit** — they cannot be synced independently without risking a mismatch between the taxonomy-referenced town and the address module's data.
+Bundle: `listing`. This content type already exists on production with a considerably more developed structure than assumed at the start of this session. Confirmed fields:
 
-**This logic must also apply to the future Listings content type** — see "Shared vs. Content-Type-Specific Logic" below.
+```
+field_business_ownership_types (entity_reference -> business_ownership_type taxonomy)
+field_canadian_towns            (entity_reference -> canadian_towns)  <- SAME vocabulary as POI
+field_hero_image                (entity_reference -> image)
+field_listing_category          (entity_reference -> listing_category)  <- SEPARATE from POI's category taxonomy
+field_listing_components        (entity_reference_revisions -> listing_gallery, listing_social, listing_amenities)  <- Paragraphs
+field_listing_phone             (telephone)
+field_listing_tags              (entity_reference -> tags)
+field_listing_website           (link)
+field_meta_description          (string)
+field_street_address            (address)
+field_street_location           (geolocation)  <- SAME field type as POI's field_poi_location
+```
 
-## POI Taxonomy
+**Key findings from this discovery, resolving previously-open questions:**
 
-72 terms: 8 parent categories, 64 child categories.
+1. **`field_canadian_towns` is shared between POI and Listing** — same vocabulary, confirmed by direct field inspection. The combined town/address ownership-unit design built for POI extends cleanly to Listing without modification.
+2. **Listing has its own independent category taxonomy** (`listing_category`, separate from POI's 72-term vocabulary). No collision with the POI classification work.
+3. **Listing already has a Paragraphs-based component system** (`field_listing_components`), referencing `listing_gallery`, `listing_social`, `listing_amenities` paragraph bundles. This is the existing, real mechanism that should be used for "paid tier unlocks more" — see Business Model / Classification Strategy section below. No new architecture needs to be invented for this; it already exists.
+4. **`field_business_ownership_types`** references a rich, real taxonomy (Hybrid/Franchise, Indigenous Business Models, Local Ownership Models, National/International Ownership Models, Regional Ownership Models — ~30 terms total). **Confirmed purpose (per project owner): this field exists for a FUTURE feature** allowing listing owners to network/group with each other (e.g. "friends" lists, resource-sharing, easier contact between related businesses) — it is NOT intended for, and does not fit, POI-vs-Listing import classification. It has no term representing "not a business" (e.g. no term for government/public services), because that was never its purpose. **Decision: this field is out of scope for the classification engine.** It remains available to be "utilized" (project owner's words) for the ownership-networking feature when that is eventually built, but the importer must not repurpose it for import-time classification, to avoid conflating two unrelated meanings on one field.
 
-Parent categories: Arts & Attractions, History & Heritage, Landmarks & Structures, Nature & Landscapes, Parks, Religious & Sacred Places, Trails & Routes, Unusual & Quirky.
+## Business Model / Content-Type Classification Strategy — MAJOR DISCUSSION THIS SESSION, DECISION IN PROGRESS
 
-- User-facing/editorial; do not treat term IDs as permanent mapping logic.
-- Geoapify category mapping must be data-driven (stable identifiers such as UUIDs, not raw term IDs).
-- Schema.org mapping is a separate concern from editorial taxonomy.
+This is the most significant open design conversation from this session and is **not yet fully resolved** — captured here in detail so the reasoning isn't lost.
 
-### Initial Geoapify Mapping Direction
+### The problem
 
-Unchanged from original spec — still needs re-verification against current Geoapify category documentation before being treated as authoritative. No changes made this session. Mappings must support at least: DIRECT, CONDITIONAL, IGNORE, UNMAPPED. Unmapped source categories must not silently become arbitrary POI categories.
+Geoapify categories don't cleanly separate into "free public attraction" vs. "commercial business" — many genuine tourist attractions (museums, zoos, aquariums, theme parks, breweries-with-tours) are also commercial operations. The original spec's mapping table listed several of these (`entertainment.museum`, `.zoo`, `.aquarium`, `.theme_park`, `.culture.*`) as DIRECT POI mappings — but the project owner's business model is to **sell Listings to businesses**, meaning giving a zoo or museum away for free as a POI actively undercuts a potential sale.
 
-## Field Ownership Matrix — RESOLVED (v1)
+### Discovery that triggered this discussion (real data, this session)
 
-| Field(s) | Source data available? | Ownership | Sync behavior |
-|---|---|---|---|
-| Title (node title) | Yes — `properties.name` | Source-controlled | **SOURCE_INITIAL** — set on creation, never overwritten afterward. *(Open question: should this instead stay in sync long-term? Deferred.)* |
-| `field_poi_location` | Yes — `geometry.coordinates` | Source-controlled | **SOURCE_AUTHORITATIVE** — always synced |
-| `field_canadian_towns` + `field_poi_address` (combined unit — see above) | Yes — `properties.city`/`state` for town, `properties.address_line1/2`, `street`, `postcode` etc. for address | Source-controlled, mediated by mapping | **SOURCE_ASSISTED_REVIEW** by default; see verification rule below for when this is skipped |
-| `field_poi_category` | Yes — via mapping engine | Source-controlled, mediated by mapping | **SOURCE_ASSISTED_REVIEW** — CONDITIONAL/UNMAPPED results are never auto-applied |
-| `field_description` | No | Towns Canada-controlled | **EDITORIAL_LOCKED** |
-| `field_hero_image` | No | Towns Canada-controlled | **EDITORIAL_LOCKED** |
-| `field_meta_description` | No | Towns Canada-controlled | **EDITORIAL_LOCKED** |
-| `field_poi_tags` | No | Towns Canada-controlled | **EDITORIAL_LOCKED** |
+Running the new `geoapify:fetch` Drush command (see below) against a 15km radius around Fort McMurray returned 7 features, all named after virtues: Humility, Truth, Honesty, Wisdom, Courage, Respect, Love. Investigation of the raw stored JSON confirmed these are individually-geocoded points under `tourism.attraction.artwork.sculpture` — very likely Fort McMurray's "Seven Grandfather Teachings" public art installation, tagged as 7 separate OSM nodes rather than one site. This is real, concrete evidence that naive category-based import produces obviously-wrong results (7 near-duplicate "attractions" that are really one sculpture series), and became the first confirmed entry in the classification engine's IGNORE list.
 
-### Sync-behavior states (per-field; distinct from the per-record import-status enum)
+### Options discussed, in order
 
-- **SOURCE_AUTHORITATIVE** — always overwritten from the latest source fetch.
-- **SOURCE_INITIAL** — populated once at creation, then left alone.
-- **SOURCE_ASSISTED_REVIEW** — source proposes a value; lands in review (`NEEDS_REVIEW`) rather than auto-applying.
-- **EDITORIAL_LOCKED** — sync never writes to this field.
+1. **Static, hardcoded config-file mapping table** (Geoapify category → term UUID). **REJECTED** once local/production taxonomy divergence was confirmed — a static table built from one environment's real UUIDs would be wrong on the other environment if term content itself differs, not just term IDs.
 
-### Address/town verification rule — RESOLVED (v1, configurable)
+2. **Dynamic, taxonomy-field-driven mapping** (add `field_geoapify_categories` to POI Category taxonomy terms; mapper queries live taxonomy at classification time; hierarchy-walking so not every leaf category needs individual tagging). **ADOPTED AS THE CORRECT APPROACH**, specifically because it works correctly regardless of what each environment's taxonomy actually contains — no environment-specific code or manual sync needed. This was the direct resolution to the local/production divergence problem.
 
-The address/town unit **skips review and is treated as verified** when either:
+3. **Simple "conducts business = Listing, doesn't = POI" rule.** Discussed, but immediately ran into real tension: applying it strictly would flip museums/zoos/aquariums/theme parks from POI (original spec) to Listing — a deliberate reversal the project owner confirmed wanting, BUT which creates cases too ambiguous to resolve by category alone (e.g., is a municipally-run museum different from a privately-owned one? Geoapify's category data cannot tell us ownership).
 
-1. **Places API self-verification:** the Geoapify Places response for the place includes both `housenumber` AND `street` (a genuine civic address, not just a nearby-street reference or a place name in `address_line1`).
-2. **Reverse-geocode fallback** (only triggered when #1 fails, and only if enabled — see below): the coordinates are reverse-geocoded, and the result's `rank.match_type` is in an admin-configurable accepted list (default: `full_match`, `match_by_building`) AND `rank.confidence_building_level` meets an admin-configurable threshold (default: `0.8`).
+4. **Explicit exceptions carved out regardless of "sells something":** historic places, government buildings, medical centers/hospitals, police stations, fire stations — confirmed by project owner as staying POI regardless of any commercial activity. Two sub-cases flagged as still needing a decision: private medical/dental clinics and pharmacies (arguably commercial, unlike hospitals) — **NOT YET RESOLVED.**
 
-If neither condition is met, the address/town unit falls to `SOURCE_ASSISTED_REVIEW` as normal.
+5. **Investigated whether `field_business_ownership_types` could resolve the public/private ambiguity automatically.** **RULED OUT** — see Listing Content Type section above; that field is scoped for a different, future purpose and has no "not a business" term.
 
-**Implemented as:** `Drupal\geoapify_importer\Service\AddressVerifier` (service ID `geoapify_importer.address_verifier`), calling `GeoapifyClient::reverseGeocode()` only when needed (fallback, not run on every record, to control API cost).
+6. **Discussed real-world precedent: how does Google structure Places/Business Profiles?** Confirmed via research: Google uses **one record per place, free by default**, with paid features (e.g. "Google Guaranteed") as an add-on to the *same* record — not a separate listing type for paid vs. free. This directly informed the recommended direction below.
 
-**Configuration (UI-editable via the settings form, not hardcoded):**
-- `reverse_geocode_enabled` (boolean, default `false`) — whole feature is opt-in due to added API cost.
-- `reverse_geocode_confidence_threshold` (float, 0–1, default `0.8`).
-- `reverse_geocode_accepted_match_types` (list, default `['full_match', 'match_by_building']`).
+7. **Discussed merging POI and Listing into one content type** to avoid the classification problem entirely. **REJECTED** by project owner — explicitly wants to keep the two existing content types separate, citing the cost of rebuilding search/views/permissions/templates around a merged structure. Confirmed: **no merge; POI and Listing remain fully separate content types, unchanged in their existing structure.**
 
-All three are exposed on `/admin/config/services/geoapify-importer`, with UI copy explaining that enabling the fallback increases Geoapify API usage/cost. **Confirmed working end-to-end**, including config schema validation and persistence.
+8. **Discussed "start as free POI, later upgrade to paid Listing" as a genuine product goal** (confirmed: yes, this is wanted, prioritizing thoroughness over minimizing build size). Two architectural options were presented:
+   - **Option 1 (recommended, not yet built):** Listing is its own node with an entity-reference field pointing back to a POI node it "upgrades"; POI stays the canonical free record, Listing adds paid-only data on top. No duplicate name/address/coordinates.
+   - **Option 2:** a shared underlying "Place" data structure referenced by both POI and Listing as siblings, rather than one being primary. Bigger to build, not currently justified given the confirmed POI-first flow.
+   - **Not yet finalized** which option to build, though Option 1 fits the stated flow (POI first, then optionally upgraded) most directly. Also not yet resolved: whether a POI is ever retired/removed once upgraded, or permanently remains as the free base layer with the Listing purely additive (current assumption, unconfirmed: the latter).
 
-**OPEN ITEM:** the exact response field paths (`rank.match_type`, `rank.confidence_building_level`) are inferred from Geoapify documentation and have not yet been confirmed against a real `reverseGeocode()` API call. Must verify before relying on this in production.
+9. **Applying the Google model to Listing's EXISTING structure (this session's most concrete conclusion):** Since Listing already has a real Paragraphs-based component system (`field_listing_components`), the "paid unlocks more" mechanism does not need to be invented — a paid Listing simply gets access to more/different paragraph types (or richer versions of `listing_gallery`/`listing_social`/`listing_amenities`) attached to this same existing field, likely gated by a new boolean flag (e.g. `field_is_paid`, not yet created) or a future real subscription/billing record. **This significantly de-risks the "paid components" part of the plan — it's additive to Listing's existing structure, not a rebuild.**
 
-## Shared vs. Content-Type-Specific Logic (Architecture Goal — reaffirmed)
+### Current working classification rule (synthesized from the discussion, NOT YET COMPLETE OR CODED beyond the IGNORE list)
 
-Per the original spec's Architecture Goal, and reaffirmed explicitly this session for the address-verification rule specifically:
+- Default: a Geoapify category that represents a commercial operation → classify toward **Listing**.
+- Explicit exceptions, regardless of commercial activity → stays **POI**: historic/heritage sites, government buildings, hospitals, police stations, fire stations, tourism information centres, cemeteries.
+- **Still unresolved:** private medical/dental clinics, pharmacies; and the full museum/zoo/aquarium/theme_park category set (original spec said POI; business-model discussion suggests Listing; not finalized).
+- **Still unresolved:** the mechanism for genuinely ambiguous individual places (e.g., is a specific zoo municipally-run or privately-owned) — current working assumption is these fall to `NEEDS_REVIEW` for manual, case-by-case human judgment, since Geoapify's category data alone cannot distinguish ownership structure, and `field_business_ownership_types` was ruled out as a shortcut for this (see above). This keeps the classification RULE simple and automatic for clear-cut cases, while accepting that some cases will always need a human decision — considered acceptable per project owner ("difficult... a lot of them cross over").
 
-- **Shared/reusable (content-type-agnostic):** the fact that "does this coordinate resolve to a verified address" is a data-quality question about Geoapify itself, independent of what content type consumes the answer. `AddressVerifier` and `GeoapifyClient::reverseGeocode()` are built as shared infrastructure for this reason, returning a generic confidence result rather than writing directly to any POI-specific field.
-- **NOT shared (content-type-specific):** the actual target field names (`field_canadian_towns`, `field_poi_address`) are POI's bundle-specific fields. Whether Listings uses the same taxonomy vocabulary, the same address module configuration, or a different geographic model entirely is **not yet known** and must not be assumed.
-- **OPEN QUESTION, unresolved:** does the future Listings content type reference the same Canadian Towns taxonomy vocabulary as POI? Does it use the address module the same way (locality hidden, town via taxonomy)? This must be answered before any Listings-specific mapping is built, but does not block current POI work since the shared resolver's output is generic.
+**This entire section needs a dedicated follow-up session to finalize the category-by-category IGNORE/DIRECT list before `PoiCategoryClassifier` can be meaningfully expanded beyond the single artwork rule.**
 
-## Ingestion / Synchronization Design (unchanged from original spec — not yet implemented)
+## Classification Engine — IN PROGRESS
 
-- Drupal cron, Queue API, Drush commands, pagination, rate limiting, error handling, logging, duplicate detection, change detection, review workflows.
-- Planned Drush commands: `geoapify:import`, `geoapify:check-updates`, `geoapify:status` (names/options may be refined during implementation).
+### Geoapify's full category list — OBTAINED THIS SESSION (authoritative, live-pulled)
 
-## Record Identity / Duplicate Detection
+833 categories confirmed via Geoapify's own `list_place_categories` endpoint (called live, using the project's real API key, via `v1/mcp` JSON-RPC). This is the authoritative source for all future mapping/classification work — superior to piecing categories together from documentation pages, which was the previous approach. Full list obtained and reviewed; available in conversation history if needed again, or re-fetchable via the same method at any time for a refresh.
 
-- Preferred identity: Geoapify place ID — confirmed as the directory-naming key in `SourceFileWriter`.
-- Fallback mechanisms (coordinates; normalized name + geographic context) not yet implemented.
-- Duplicate detection must be deterministic and logged — not yet implemented at the Drupal-node level (file-level identity via `place_id` is in place; node-level duplicate checking is not).
+### `PoiCategoryClassifier` — BUILT AND VERIFIED THIS SESSION
 
-## Import Statuses (unchanged from original spec — not yet implemented)
+- Class: `Drupal\geoapify_importer\Service\Poi\PoiCategoryClassifier`.
+- Service: `geoapify_importer.poi_category_classifier` (no dependencies — pure logic).
+- **Scope, deliberately narrow:** answers only "should this ever become a POI at all?" via a small, code-level (not taxonomy-field-based) IGNORE list. Does NOT yet perform DIRECT/CONDITIONAL mapping to actual taxonomy terms — that requires the dynamic, taxonomy-field-driven mapper described above, not yet built.
+- **Why IGNORE is code, not a taxonomy field:** "should this category ever become a POI" is a data-quality/business rule, not an editorial taxonomy decision — kept separate from the (not-yet-built) DIRECT-mapping mechanism, which WILL be taxonomy-field-driven for the reasons in the "Local vs. Production Data Divergence" section.
+- **Matching logic:** hierarchy-aware (exact match, or dot-separated child of an ignored branch). Real-data testing revealed Geoapify's `categories` array already includes the full ancestor chain for every feature (not just the most specific leaf), so exact-matching against any array element is sufficient in practice; prefix-walking is kept as a safety net.
+- **Current IGNORE list:** `tourism.attraction.artwork` only (covers `.mural`, `.sculpture`, `.statue` children) — confirmed via the real Seven Grandfather Teachings data.
+- **Verified:** tested against two real stored records — the "Love" artwork piece (correctly `ignored`) and "Heritage Village" museum (correctly `pending_mapping`, since DIRECT mapping isn't built yet).
+- **Expansion pending:** the full IGNORE list expansion is blocked on finalizing the Business Model / Classification Strategy decisions above (see that section's "still unresolved" items) — deliberately not expanded further this session until those are settled, to avoid coding a rule that will need to be reversed.
 
-`NEW`, `IMPORTED`, `UNCHANGED`, `CHANGED`, `NEEDS_REVIEW`, `IGNORED`, `ERROR`, `SOURCE_UPDATED` — final status model still deferred until change-detection logic is built, per original spec's own sequencing rule.
+### Confirmed exclusions from IGNORE, per explicit project owner instruction
 
-## Development Rules (unchanged, reaffirmed — with one addition)
+- `tourism.information.*` (visitor/info centres) — people do seek these out; stays out of IGNORE regardless of the business-model discussion.
+- `memorial.cemetery`, `memorial.graveyard` — same; stays out of IGNORE.
 
-- Work locally unless explicitly instructed otherwise.
-- Never assume a `web/` directory exists.
-- Never modify production while developing.
-- Verify Drupal paths and API behavior before giving commands — do not claim behavior without verification.
-- Preserve working code unless a change is necessary; prefer non-destructive changes.
-- Do not create SQL storage for raw source data; do not put persistent raw source files inside the module directory.
-- Do not hardcode taxonomy term IDs or match-type/confidence thresholds into business logic when a config-driven mechanism can be used instead.
-- Do not build the entire importer in one step; separate verified facts from proposed design.
-- **When editing existing files, work from the actual current file contents (e.g. by cloning the real repo), not from fragments or assumptions.** This session found two real bugs (missing `ConfigFormBase` constructor arguments) and a corrupted config schema (mis-nested YAML from a manual paste) that fragment-based editing had missed or caused. Cloning the actual GitHub repo and editing real file contents directly is now the standard approach going forward.
+## Dev Tooling — NEW THIS SESSION
+
+### `drush geoapify:fetch` — Drush command, built and verified
+
+- File: `src/Drush/Commands/GeoapifyImporterCommands.php`.
+- Discovered automatically by Drush 13 via `ContainerInjectionInterface` (no `drush.services.yml` needed).
+- Usage: `drush geoapify:fetch <count> [--categories=] [--lat=] [--lon=] [--radius=]`.
+- Defaults: `categories=entertainment,tourism`, Fort McMurray-area center, 15km radius.
+- `count` is clamped to Geoapify's real documented range (1–500), with a warning if adjusted, rather than erroring.
+- Fetches via `GeoapifyClient::request()`, writes each result via `SourceFileWriter::write()`, prints a results table (name / place_id / file path) and a success count.
+- **Scope, explicitly narrow:** this is a manual dev/test tool for exercising fetch+store — it does NOT classify, map, or create nodes. The eventual full `geoapify:import` command (per original spec) is separate, not-yet-built, and will layer classification/mapping/node-creation on top of what this command already proves works.
+- **Live-tested at `limit=20`** (returned 7 real features — see Classification Engine discovery above).
+
+## Ingestion / Synchronization Design (mostly unchanged — not yet implemented)
+
+- Drupal cron, Queue API, further Drush commands (`geoapify:import`, `geoapify:check-updates`, `geoapify:status`), pagination, rate limiting, error handling beyond what exists, duplicate detection, change detection, review workflows.
+- `geoapify:fetch` (above) is a new, real, narrower precursor to `geoapify:import` — not a replacement for it.
+
+## Record Identity / Duplicate Detection (unchanged)
+
+Preferred identity: Geoapify place ID, confirmed as the file-level identity key. Node-level duplicate detection not yet implemented.
+
+## Import Statuses (unchanged, not yet implemented)
+
+`NEW`, `IMPORTED`, `UNCHANGED`, `CHANGED`, `NEEDS_REVIEW`, `IGNORED`, `ERROR`, `SOURCE_UPDATED`. `IGNORED` now has a concrete, coded first implementation via `PoiCategoryClassifier`, though not yet wired into a persisted per-record status.
+
+## Field Ownership Matrix (unchanged from prior revision — see that document for the full table)
+
+POI's matrix (title, location, category, description, etc.) stands as previously defined. **Not yet extended to Listing** — Listing's real field structure is now known (this session), but its own field-ownership matrix (which Listing fields are source-controlled vs. business-owner-controlled vs. platform-controlled-paid-features) has not yet been designed.
+
+## Development Rules (reaffirmed, with one addition this session)
+
+All prior rules stand. Additionally: **when local and production may structurally differ (taxonomy content, field structure, private file paths), verify against production directly (read-only, via SSH/Drush) rather than assuming local is representative.** This session's production research uncovered a materially more developed Listing content type than assumed, and confirmed a real local/production taxonomy divergence that directly changed the classification engine's design (static config rejected in favor of dynamic taxonomy-field mapping).
 
 ## Current Verified State
 
-### Verified
+### Verified this session (in addition to everything verified previously)
 
-- Local Drupal 11 environment; PHP 8.4+ target
-- Module discovered, installed, service container loads
-- Settings route and menu work
-- State API stores Geoapify key; key is configured locally and confirmed intact
-- `GeoapifyClient` instantiates; Places API request succeeds with real spatial-circle + categories query; returns valid `FeatureCollection`
-- POI content type, geographic fields, address field, and taxonomy exist
-- Module is under git version control, pushed to a public GitHub remote (`itwerxdotca/geoapify_importer`, `main` branch), managed via GitHub Desktop
-- Local private filesystem configured and verified (`PrivateStream::basePath()` confirms it)
-- Source-file naming/partitioning strategy implemented and live-tested (write, archive-on-rewrite, read-back all confirmed against real Geoapify data)
-- Field ownership matrix defined (v1), including the combined town/address unit and its verification-skip rule
-- `AddressVerifier` and `GeoapifyClient::reverseGeocode()` implemented, wired into config and the settings UI
-- Settings-form constructor bugs found and fixed (missing `config.factory`/`config.typed` injection) — form now loads and submits correctly
-- `geoapify_importer.settings` config object confirmed created with correct values via `drush config:get`
-- All module YAML files rewritten and confirmed clean (verified via `cat -evt`, no tabs, correct nesting)
+- Reverse-geocode fallback corrected to use real, confirmed signal (housenumber+street), replacing an invalid design based on fields the API doesn't return
+- Settings form/config fully consistent across local site, stored config, and GitHub (a real discrepancy between these three was found and fixed)
+- `geoapify:fetch` Drush command built, verified working end-to-end at `limit=20` against real data
+- `PoiCategoryClassifier` built and verified against real data (artwork → ignored; museum → pending_mapping)
+- Geoapify's full 833-category list obtained live and authoritatively
+- Production's real field structures for both `point_of_interest` and `listing` confirmed via direct, read-only SSH/Drush inspection
+- Production/local version parity confirmed (Drupal 11.4.7, PHP 8.4.26, Drush 13.8.0.0 on both)
+- Local vs. production taxonomy divergence confirmed as real and structural, directly shaping the classification engine's design toward dynamic taxonomy-field-driven mapping over static config
 
-### Not yet implemented / not yet verified
+### Not yet implemented / not yet resolved
 
-- Live confirmation of the real reverse-geocode response shape (`rank.match_type`, `rank.confidence_building_level` paths are doc-inferred, not confirmed)
-- Geoapify response archival retention/pruning policy (deferred, not blocking)
-- Classification engine (category mapping DIRECT/CONDITIONAL/IGNORE/UNMAPPED logic)
-- Mapping engine
-- Node-level duplicate detection (beyond file-level `place_id` identity)
-- Change detection logic (diffing `latest.json` against `history/`)
-- POI creation/update service
-- Queue workers, cron processing, Drush import/update/status commands
-- Import status persistence
-- Listings content type field structure (unknown — required before any shared-logic-to-Listings wiring can happen)
-- Production deployment
+- **Business Model / Classification Strategy finalization** (see dedicated section above) — the single biggest open item, blocking further IGNORE-list expansion and all DIRECT-mapping work
+- Dynamic taxonomy-field-driven mapper itself (`field_geoapify_categories` on POI Category terms; the actual `PoiCategoryMapper` service performing DIRECT/CONDITIONAL lookups) — designed in discussion, not yet built
+- Whether/how a POI can be "upgraded" to a Listing (Option 1 vs. Option 2 from the discussion above) — not finalized, not built
+- Listing's own field-ownership matrix
+- `field_is_paid` (or equivalent) flag/mechanism gating Listing's paid components
+- Production private-filesystem path naming confirmation (`/home/townscanada/backup`)
+- Confirmation of whether production's Canadian Towns taxonomy content actually differs from local's (divergence was stated by project owner; not yet directly diffed term-by-term)
+- Everything previously listed as not-yet-implemented in prior revisions: node-level duplicate detection, change detection logic, POI/Listing creation services, queue workers, cron, remaining Drush commands, import status persistence, production deployment of this module

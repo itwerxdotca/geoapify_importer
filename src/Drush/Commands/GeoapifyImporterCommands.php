@@ -3,7 +3,9 @@
 namespace Drupal\geoapify_importer\Drush\Commands;
 
 use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
+use Drupal\geoapify_importer\Service\ChangeDetector;
 use Drupal\geoapify_importer\Service\GeoapifyClient;
+use Drupal\geoapify_importer\Service\PlaceIdentity;
 use Drupal\geoapify_importer\Service\SourceFileWriter;
 use Drush\Attributes as CLI;
 use Drush\Commands\DrushCommands;
@@ -29,6 +31,8 @@ final class GeoapifyImporterCommands extends DrushCommands implements ContainerI
   public function __construct(
     private readonly GeoapifyClient $client,
     private readonly SourceFileWriter $writer,
+    private readonly ChangeDetector $detector,
+    private readonly PlaceIdentity $identity,
   ) {
     parent::__construct();
   }
@@ -40,11 +44,17 @@ final class GeoapifyImporterCommands extends DrushCommands implements ContainerI
     return new self(
       $container->get('geoapify_importer.client'),
       $container->get('geoapify_importer.source_writer'),
+      $container->get('geoapify_importer.change_detector'),
+      $container->get('geoapify_importer.place_identity'),
     );
   }
 
   /**
-   * Fetches places from Geoapify and stores them via SourceFileWriter.
+   * Fetches places from Geoapify and stores new or changed ones.
+   *
+   * Each place is compared against its stored latest.json via
+   * ChangeDetector first. Unchanged places are skipped (no write, no new
+   * history file); new and changed places are written via SourceFileWriter.
    *
    * @param int $count
    *   Number of places to fetch. Clamped to Geoapify's documented range
@@ -131,28 +141,70 @@ final class GeoapifyImporterCommands extends DrushCommands implements ContainerI
     }
 
     $rows = [];
+    $counts = [
+      ChangeDetector::STATUS_NEW => 0,
+      ChangeDetector::STATUS_CHANGED => 0,
+      ChangeDetector::STATUS_UNCHANGED => 0,
+      'error' => 0,
+    ];
 
     foreach ($features as $feature) {
       $properties = $feature['properties'] ?? [];
-      $place_id = $properties['place_id'] ?? NULL;
       $name = $properties['name'] ?? '(no name)';
 
-      if ($place_id === NULL) {
-        $this->io()->warning("Skipped a feature with no place_id: {$name}");
+      // Storage key comes from the OSM reference, not place_id: place_id
+      // embeds coordinates that shift between requests, so the same place
+      // would otherwise be stored twice. See PlaceIdentity.
+      try {
+        $key = $this->identity->keyFor($feature);
+      }
+      catch (\InvalidArgumentException $e) {
+        $this->io()->warning("Skipped {$name}: " . $e->getMessage());
         continue;
       }
 
       try {
-        $uri = $this->writer->write($place_id, $feature);
-        $rows[] = [$name, $place_id, $uri];
+        // Detection must happen BEFORE the write: write() archives and
+        // replaces latest.json, after which stored and incoming are equal.
+        $result = $this->detector->detect($feature, $this->writer->readLatest($key));
+        $status = $result['status'];
+
+        if ($status === ChangeDetector::STATUS_UNCHANGED) {
+          $detail = 'skipped (no write)';
+        }
+        else {
+          $this->writer->write($key, $feature);
+          $detail = $status === ChangeDetector::STATUS_CHANGED
+            ? 'written; changed: ' . implode(', ', array_keys($result['changed_fields']))
+            : 'written';
+        }
+
+        $counts[$status]++;
+        $rows[] = [$name, $status, $detail, $key];
       }
       catch (\Throwable $e) {
-        $this->io()->error("Failed to write {$name} ({$place_id}): " . $e->getMessage());
+        $counts['error']++;
+        $rows[] = [$name, 'error', $e->getMessage(), $key];
       }
     }
 
-    $this->io()->table(['Name', 'Place ID', 'Written To'], $rows);
-    $this->io()->success(sprintf('Wrote %d of %d fetched place(s) to the private filesystem.', count($rows), count($features)));
+    $this->io()->table(['Name', 'Status', 'Action', 'Storage Key'], $rows);
+
+    $summary = sprintf(
+      '%d new, %d changed, %d unchanged (skipped), %d error(s) out of %d fetched place(s).',
+      $counts[ChangeDetector::STATUS_NEW],
+      $counts[ChangeDetector::STATUS_CHANGED],
+      $counts[ChangeDetector::STATUS_UNCHANGED],
+      $counts['error'],
+      count($features)
+    );
+
+    if ($counts['error'] > 0) {
+      $this->io()->warning($summary);
+    }
+    else {
+      $this->io()->success($summary);
+    }
   }
 
 }

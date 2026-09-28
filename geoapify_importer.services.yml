@@ -14,6 +14,12 @@ services:
   geoapify_importer.poi_category_classifier:
     class: Drupal\geoapify_importer\Service\Poi\PoiCategoryClassifier
 
+  geoapify_importer.change_detector:
+    class: Drupal\geoapify_importer\Service\ChangeDetector
+
+  geoapify_importer.place_identity:
+   class: Drupal\geoapify_importer\Service\PlaceIdentity
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']
