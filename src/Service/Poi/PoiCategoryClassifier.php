@@ -79,9 +79,25 @@ class PoiCategoryClassifier {
     // business is out" of POI, with the named exceptions handled by
     // simply never appearing in this list (see class docblock).
     'accommodation' => self::REASON_COMMERCIAL,
+    // NOTE: no blanket 'building' entry here, by design. Geoapify tags
+    // many places with a generic building.* category ALONGSIDE their
+    // specific one (e.g. a museum gets both 'building.tourism' and
+    // 'entertainment.museum'; a place of worship gets 'building.
+    // place_of_worship' and 'religion.place_of_worship.*'). Ignoring
+    // 'building' as a blanket parent would have silently ignored real
+    // POI candidates — hospitals (building.healthcare), churches
+    // (building.place_of_worship), historic sites (building.historic),
+    // government buildings (building.public_and_civil) — whenever that
+    // generic tag happened to be checked before their specific one.
+    // Found via real data: Oil Sands Discovery Centre carries
+    // 'building.tourism' and only avoided this because needs_review is
+    // checked as a full pass before ignored. Every genuinely commercial
+    // building.* case (accommodation, catering, offices, retail) already
+    // matches independently via its own specific category, so this rule
+    // was redundant for the cases it was meant to catch and dangerous
+    // for everything else.
     'activity' => self::REASON_COMMERCIAL,
     'adult' => self::REASON_COMMERCIAL,
-    'building' => self::REASON_COMMERCIAL,
     'catering' => self::REASON_COMMERCIAL,
     'commercial' => self::REASON_COMMERCIAL,
     'education' => self::REASON_COMMERCIAL,

@@ -6,6 +6,7 @@ use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
 use Drupal\geoapify_importer\Service\ChangeDetector;
 use Drupal\geoapify_importer\Service\GeoapifyClient;
 use Drupal\geoapify_importer\Service\PlaceIdentity;
+use Drupal\geoapify_importer\Service\Poi\PoiCategoryClassifier;
 use Drupal\geoapify_importer\Service\SourceFileWriter;
 use Drush\Attributes as CLI;
 use Drush\Commands\DrushCommands;
@@ -14,12 +15,14 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 /**
  * Drush commands for manually fetching and storing Geoapify data.
  *
- * These are dev/test tools for exercising GeoapifyClient and
- * SourceFileWriter directly against the live API. They do NOT
- * classify, map, or create any Drupal nodes — see project spec,
- * "Architecture Goal". The full import pipeline (geoapify:import)
- * is a separate, not-yet-built command that will use these same
- * services plus classification/mapping/node-creation logic.
+ * These are dev/test tools for exercising GeoapifyClient, SourceFileWriter,
+ * ChangeDetector, PlaceIdentity, and PoiCategoryClassifier together against
+ * the live API. Classification is reported for visibility only — it does
+ * NOT gate whether a place is written, and this command does NOT map to
+ * taxonomy terms or create any Drupal nodes — see project spec,
+ * "Architecture Goal". The full import pipeline (geoapify:import) is a
+ * separate, not-yet-built command that will use these same services plus
+ * the DIRECT-mapping taxonomy mapper and node-creation logic.
  */
 final class GeoapifyImporterCommands extends DrushCommands implements ContainerInjectionInterface {
 
@@ -33,6 +36,7 @@ final class GeoapifyImporterCommands extends DrushCommands implements ContainerI
     private readonly SourceFileWriter $writer,
     private readonly ChangeDetector $detector,
     private readonly PlaceIdentity $identity,
+    private readonly PoiCategoryClassifier $classifier,
   ) {
     parent::__construct();
   }
@@ -46,6 +50,7 @@ final class GeoapifyImporterCommands extends DrushCommands implements ContainerI
       $container->get('geoapify_importer.source_writer'),
       $container->get('geoapify_importer.change_detector'),
       $container->get('geoapify_importer.place_identity'),
+      $container->get('geoapify_importer.poi_category_classifier'),
     );
   }
 
@@ -179,16 +184,25 @@ final class GeoapifyImporterCommands extends DrushCommands implements ContainerI
             : 'written';
         }
 
+        // Classification never gates the write above — every fetched
+        // place is stored regardless of what it classifies as; sorting
+        // happens on top of stored data, not instead of storing it.
+        $classification = $this->classifier->classify($properties['categories'] ?? []);
+        $class_label = $classification['status'];
+        if ($classification['reason']) {
+          $class_label .= ' (' . $classification['reason'] . ')';
+        }
+
         $counts[$status]++;
-        $rows[] = [$name, $status, $detail, $key];
+        $rows[] = [$name, $status, $detail, $class_label, $key];
       }
       catch (\Throwable $e) {
         $counts['error']++;
-        $rows[] = [$name, 'error', $e->getMessage(), $key];
+        $rows[] = [$name, 'error', $e->getMessage(), '-', $key];
       }
     }
 
-    $this->io()->table(['Name', 'Status', 'Action', 'Storage Key'], $rows);
+    $this->io()->table(['Name', 'Status', 'Action', 'Classification', 'Storage Key'], $rows);
 
     $summary = sprintf(
       '%d new, %d changed, %d unchanged (skipped), %d error(s) out of %d fetched place(s).',
