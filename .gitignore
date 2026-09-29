@@ -4,6 +4,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+SPEC.md
 
 # Never applicable here, but guard against accidental local config/secrets
 *.local.php

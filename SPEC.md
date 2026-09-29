@@ -1,5 +1,17 @@
 # Towns Canada — Geoapify Importer Project Specification (Updated)
 
+## Revision Notes (latest revision)
+
+Changes since the previous revision, most important first:
+
+1. **Record identity corrected.** Geoapify's `place_id` is NOT stable across requests, so it cannot be the record identity (the original spec's preferred identity, and something this project asserted without testing). The storage key is now derived from the OpenStreetMap type and ID by a new `PlaceIdentity` service. See "Record Identity / Duplicate Detection".
+2. **Change detection built and verified** (`ChangeDetector`), including a 50 m distance tolerance for coordinates after an exact comparison produced a false "changed" result. See "Change Detection".
+3. **`geoapify:fetch` now skips unchanged places** and reports a status per place.
+4. **Directory-case bug fixed:** the classifier folder was committed as `Service/POI` but its namespace is `...\Service\Poi`. This worked on macOS (case-insensitive) but would have broken autoloading on production (Linux). Renamed to `Service/Poi`.
+5. **New open item:** multi-category Places queries returned a subset of what was expected. See "Places API".
+
+The copy of this document in the module repository is `SPEC.md`; keep the two in sync.
+
 ## Purpose
 
 Build a reusable Drupal module named Geoapify Importer for Towns Canada.
@@ -71,9 +83,11 @@ geoapify_importer/
 │   ├── Form/
 │   │   └── GeoapifyImporterSettingsForm.php
 │   └── Service/
-│       ├── GeoapifyClient.php
-│       ├── SourceFileWriter.php
 │       ├── AddressVerifier.php
+│       ├── ChangeDetector.php
+│       ├── GeoapifyClient.php
+│       ├── PlaceIdentity.php
+│       ├── SourceFileWriter.php
 │       └── Poi/
 │           └── PoiCategoryClassifier.php
 ├── geoapify_importer.info.yml
@@ -82,7 +96,9 @@ geoapify_importer/
 └── geoapify_importer.links.menu.yml
 ```
 
-Note the `Service/Poi/` subdirectory — introduced this session specifically to keep POI-specific classification logic separate from shared ingestion infrastructure (`GeoapifyClient`, `SourceFileWriter`, `AddressVerifier`), per the Architecture Goal.
+Note the `Service/Poi/` subdirectory: it keeps POI-specific classification logic separate from shared ingestion infrastructure (`GeoapifyClient`, `SourceFileWriter`, `AddressVerifier`, `ChangeDetector`, `PlaceIdentity`), per the Architecture Goal.
+
+**Rule: directory names must match namespace casing exactly.** Local macOS is case-insensitive and hides mismatches; production Linux is case-sensitive and does not.
 
 ## Source Data Architecture
 
@@ -102,17 +118,17 @@ Geoapify API → Raw source files → Classification/validation/change detection
 ```
 private://geoapify_importer/
 ├── pois/
-│   ├── {place_id}/
+│   ├── {storage_key}/
 │   │   ├── latest.json
 │   │   └── history/
 │   │       └── {timestamp}.json
 ```
 
-- `{place_id}`: Geoapify's own opaque place ID, used verbatim as directory name.
+- `{storage_key}`: derived by `PlaceIdentity` from the OpenStreetMap type and ID, e.g. `osm-w-306707925`. Features with no usable OSM reference fall back to `gid-{place_id}`. **This replaces the earlier scheme of using Geoapify's `place_id` verbatim**, which was found to be unstable (see "Record Identity / Duplicate Detection").
 - `{timestamp}`: `gmdate('Ymd\THis\Z')`.
 - Archive-on-rewrite confirmed working; atomic writes (temp + rename).
 
-**Implemented as:** `Drupal\geoapify_importer\Service\SourceFileWriter` (`geoapify_importer.source_writer`). `write()` and `readLatest()` both verified against real Geoapify data, including a 7-feature batch fetch this session (see `geoapify:fetch` below).
+**Implemented as:** `Drupal\geoapify_importer\Service\SourceFileWriter` (`geoapify_importer.source_writer`). `write()` and `readLatest()` both verified against real Geoapify data, including 7-feature batch fetches (see `geoapify:fetch` below). The methods' parameter is still named `$place_id` in code for historical reasons; it accepts any storage key (only `[a-zA-Z0-9_-]` survive sanitizing, which the `osm-`/`gid-` keys satisfy).
 
 **Known edge case, unaddressed:** same-second double-write to one place collides in `history/` (currently throws via `EXISTS_ERROR` — considered acceptably safe for now).
 
@@ -132,6 +148,7 @@ Unchanged. State API key (`geoapify_importer.api_key`), password field UI, confi
 - Spatial filter: `filter=circle:lon,lat,radiusMeters`.
 - **`limit` parameter confirmed against Geoapify's own docs: default 20, maximum 500.**
 - Live-tested this session at `limit=20` (returned 7 real features — see Classification Engine section for what those features revealed).
+- **OPEN ITEM — multi-category queries.** `categories=entertainment,tourism` returned 7 places, all `tourism.attraction.artwork.sculpture` (the Seven Grandfather Teachings), and none of the museums or theatres. `categories=entertainment` alone returned 7 different places (Landmark Theatres, Keyano Theatre & Arts Centre, Oil Sands Discovery Centre, Heritage Village, Landmark Cinema, Marine Park Museum, The Alley YMM). With `limit=20`, a union of the two would be expected to return more than 7, but the cause of what was actually returned is unknown and has not been investigated. Until understood, do not rely on comma-separated `categories` returning the union of its parts.
 
 ### Reverse Geocoding API — VERIFIED AND CORRECTED THIS SESSION
 
@@ -269,6 +286,18 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 - `tourism.information.*` (visitor/info centres) — people do seek these out; stays out of IGNORE regardless of the business-model discussion.
 - `memorial.cemetery`, `memorial.graveyard` — same; stays out of IGNORE.
 
+## Change Detection — BUILT AND VERIFIED
+
+- Class: `Drupal\geoapify_importer\Service\ChangeDetector`; service `geoapify_importer.change_detector` (no dependencies). Shared ingestion infrastructure, not POI-specific.
+- `detect(array $incoming, ?array $stored): array` returns `status` (`new`, `unchanged` or `changed`) and `changed_fields` (field name mapped to old/new values).
+- **Ordering constraint:** `detect()` must run BEFORE `SourceFileWriter::write()`, because `write()` archives and replaces `latest.json`; after a write, stored and incoming are identical.
+- **Compared fields (hardcoded, by decision — not UI-configurable):** `properties.name`, `street`, `housenumber`, `postcode`, `city`, `county`, `state_code`, `formatted`, `address_line1`, `address_line2`, `website`; `categories`; coordinates. Everything else, including rank/popularity scores and key order, is ignored as noise.
+- **Categories** are compared order-insensitively.
+- **Coordinates** are compared by distance moved (haversine), with a 50 m tolerance (`COORDINATE_TOLERANCE_METERS`). Reason: an earlier version rounded to 7 decimal places (about 1 cm) and reported Heritage Village as `changed: coordinates` on a re-fetch with a different query, when nothing had changed. The measured shift was 15.2 m for that building outline and effectively 0 m for a single-point node. **The 50 m value is a judgment call based on one measured data point.** Large outlines such as parks and lakes may shift more; tune from real data.
+- **Verified:** synthetic new / unchanged / changed cases; live re-fetches reported unchanged; the same places re-fetched under a different category and radius reported unchanged (no false coordinate change); a synthetic 11 m shift reported unchanged; a synthetic 222 m shift reported changed (222.4 m).
+- **Not verified:** behaviour at scale, or with large polygon features.
+- **Implication for future sync:** `field_poi_location` is SOURCE_AUTHORITATIVE in the ownership matrix. Node-update logic must consult `ChangeDetector` before writing, not overwrite blindly, or the same jitter would rewrite saved locations.
+
 ## Dev Tooling — NEW THIS SESSION
 
 ### `drush geoapify:fetch` — Drush command, built and verified
@@ -278,22 +307,37 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 - Usage: `drush geoapify:fetch <count> [--categories=] [--lat=] [--lon=] [--radius=]`.
 - Defaults: `categories=entertainment,tourism`, Fort McMurray-area center, 15km radius.
 - `count` is clamped to Geoapify's real documented range (1–500), with a warning if adjusted, rather than erroring.
-- Fetches via `GeoapifyClient::request()`, writes each result via `SourceFileWriter::write()`, prints a results table (name / place_id / file path) and a success count.
+- For each fetched place: derives the storage key via `PlaceIdentity`, runs `ChangeDetector` against `SourceFileWriter::readLatest()`, skips unchanged places (no write, no new history file), and writes new or changed ones via `SourceFileWriter::write()`.
+- Output: a table (Name / Status / Action / Storage Key; changed rows list which fields changed) and a summary line such as `0 new, 0 changed, 7 unchanged (skipped), 0 error(s) out of 7 fetched place(s).` A failure on one place becomes an `error` row and does not abort the batch.
 - **Scope, explicitly narrow:** this is a manual dev/test tool for exercising fetch+store — it does NOT classify, map, or create nodes. The eventual full `geoapify:import` command (per original spec) is separate, not-yet-built, and will layer classification/mapping/node-creation on top of what this command already proves works.
 - **Live-tested at `limit=20`** (returned 7 real features — see Classification Engine discovery above).
+- **Default `categories=entertainment,tourism` is suspect** because of the multi-category open item under "Places API".
 
 ## Ingestion / Synchronization Design (mostly unchanged — not yet implemented)
 
-- Drupal cron, Queue API, further Drush commands (`geoapify:import`, `geoapify:check-updates`, `geoapify:status`), pagination, rate limiting, error handling beyond what exists, duplicate detection, change detection, review workflows.
+- Drupal cron, Queue API, further Drush commands (`geoapify:import`, `geoapify:check-updates`, `geoapify:status`), pagination, rate limiting, error handling beyond what exists, node-level duplicate detection, review workflows. (File-level change detection is built; see "Change Detection".)
 - `geoapify:fetch` (above) is a new, real, narrower precursor to `geoapify:import` — not a replacement for it.
 
-## Record Identity / Duplicate Detection (unchanged)
+## Record Identity / Duplicate Detection — CORRECTED
 
-Preferred identity: Geoapify place ID, confirmed as the file-level identity key. Node-level duplicate detection not yet implemented.
+**Primary identity: OpenStreetMap type and ID**, from `properties.datasource.raw.osm_type` (`n`, `w` or `r`) and `.osm_id`, implemented by `PlaceIdentity::keyFor()` as the storage key `osm-{type}-{id}` (for example `osm-w-306707925`).
+
+**Why not Geoapify's `place_id`** (the original spec's preferred identity). It was tested and found unstable:
+
+- Decoding a `place_id` shows it begins with the feature's longitude and latitude as binary doubles; the trailing bytes encode the OSM ID and the place name.
+- The same place, fetched by two different queries, produced different `place_id` strings. Heritage Village (`w306707925`) differed in position by 15.2 m between a museum-only query and a broader entertainment query; Marine Park Museum (`n4261576691`) differed by about 1 mm of float noise. The OSM ID and name bytes were identical each time.
+- Consequence: the same place was stored twice under two directories until the storage key was changed. The cause of the coordinate variation between queries is unknown and has not been verified.
+- At the time of the check, all 16 stored features had an OSM reference (0 without). That is a small sample from one area.
+
+**Fallback:** a feature with no usable OSM reference uses `gid-{place_id}`. The distinct prefix makes these easy to find. The fallback inherits the instability above, so those records would be at risk of duplication. Not yet observed in practice.
+
+**Known limitation:** if an OSM object is deleted and recreated it gets a new ID and will look like a new place. The fallback duplicate detection the original spec called for (coordinates; normalized name plus geographic context) is the intended safety net and is not yet implemented.
+
+**Not yet designed:** node-level duplicate detection, meaning how a Drupal node records which storage key it came from so a re-import updates that node instead of creating another. This probably needs a field on the node (on both POI and Listing) and is required before any node-creation service is built.
 
 ## Import Statuses (unchanged, not yet implemented)
 
-`NEW`, `IMPORTED`, `UNCHANGED`, `CHANGED`, `NEEDS_REVIEW`, `IGNORED`, `ERROR`, `SOURCE_UPDATED`. `IGNORED` now has a concrete, coded first implementation via `PoiCategoryClassifier`, though not yet wired into a persisted per-record status.
+`NEW`, `IMPORTED`, `UNCHANGED`, `CHANGED`, `NEEDS_REVIEW`, `IGNORED`, `ERROR`, `SOURCE_UPDATED`. `IGNORED` now has a concrete, coded first implementation via `PoiCategoryClassifier`, though not yet wired into a persisted per-record status. `ChangeDetector` returns lowercase `new` / `unchanged` / `changed`, which correspond to NEW / UNCHANGED / CHANGED here; `geoapify:fetch` reports them, but nothing persists a per-record status yet.
 
 ## Field Ownership Matrix (unchanged from prior revision — see that document for the full table)
 
@@ -302,6 +346,11 @@ POI's matrix (title, location, category, description, etc.) stands as previously
 ## Development Rules (reaffirmed, with one addition this session)
 
 All prior rules stand. Additionally: **when local and production may structurally differ (taxonomy content, field structure, private file paths), verify against production directly (read-only, via SSH/Drush) rather than assuming local is representative.** This session's production research uncovered a materially more developed Listing content type than assumed, and confirmed a real local/production taxonomy divergence that directly changed the classification engine's design (static config rejected in favor of dynamic taxonomy-field mapping).
+
+Two further rules from this revision:
+
+- **Do not treat an external identifier as stable or unique until it has been tested across at least two differing requests.** The Geoapify `place_id` was assumed stable and was not; the error surfaced only when the same place was fetched by two different queries.
+- **Keep directory names and namespace segments identical in case.** macOS hides mismatches that Linux production will not.
 
 ## Current Verified State
 
@@ -315,6 +364,10 @@ All prior rules stand. Additionally: **when local and production may structurall
 - Production's real field structures for both `point_of_interest` and `listing` confirmed via direct, read-only SSH/Drush inspection
 - Production/local version parity confirmed (Drupal 11.4.7, PHP 8.4.26, Drush 13.8.0.0 on both)
 - Local vs. production taxonomy divergence confirmed as real and structural, directly shaping the classification engine's design toward dynamic taxonomy-field-driven mapping over static config
+- Geoapify `place_id` shown to be unstable across requests; `PlaceIdentity` (OSM type and ID) built and verified: the same places, fetched by queries of different category and radius, resolved to the same keys with no duplicates
+- `ChangeDetector` built and verified (new / unchanged / changed; 50 m coordinate tolerance; an 11 m shift reads unchanged, a 222 m shift reads changed)
+- `geoapify:fetch` skips unchanged places and reports status per place
+- Classifier directory case fixed (`POI` to `Poi`)
 
 ### Not yet implemented / not yet resolved
 
@@ -325,4 +378,9 @@ All prior rules stand. Additionally: **when local and production may structurall
 - `field_is_paid` (or equivalent) flag/mechanism gating Listing's paid components
 - Production private-filesystem path naming confirmation (`/home/townscanada/backup`)
 - Confirmation of whether production's Canadian Towns taxonomy content actually differs from local's (divergence was stated by project owner; not yet directly diffed term-by-term)
-- Everything previously listed as not-yet-implemented in prior revisions: node-level duplicate detection, change detection logic, POI/Listing creation services, queue workers, cron, remaining Drush commands, import status persistence, production deployment of this module
+- Node-level duplicate detection: how a node records its storage key (probably a new field on POI and Listing) — not designed
+- Geolocation transform: `field_poi_location` and Listing's `field_street_location` use the Geolocation module; converting Geoapify's `[lon, lat]` into its field structure is unbuilt, and the field's real properties have not yet been checked on this install
+- Multi-category Places queries returning a subset (open item under "Places API")
+- Fallback duplicate detection (coordinates; normalized name plus context) for OSM objects that are recreated with a new ID
+- Coordinate tolerance (50 m) tuning against real data, especially for large outlines
+- Everything previously listed as not-yet-implemented in prior revisions, except change detection (now built): POI/Listing creation services, queue workers, cron, remaining Drush commands (`geoapify:import`, `geoapify:check-updates`, `geoapify:status`), import status persistence, production deployment of this module
