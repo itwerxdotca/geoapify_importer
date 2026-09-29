@@ -20,12 +20,17 @@ class GeoapifyClient {
   private const REVERSE_GEOCODE_ENDPOINT = 'https://api.geoapify.com/v1/geocode/reverse';
 
   /**
+   * Geoapify Forward Geocoding API endpoint.
+   */
+  private const FORWARD_GEOCODE_ENDPOINT = 'https://api.geoapify.com/v1/geocode/search';
+
+  /**
    * Constructs the Geoapify client.
    */
   public function __construct(
-	private ClientInterface $httpClient,
-	private LoggerInterface $logger,
-	private StateInterface $state,
+  private ClientInterface $httpClient,
+  private LoggerInterface $logger,
+  private StateInterface $state,
   ) {}
 
   /**
@@ -41,58 +46,58 @@ class GeoapifyClient {
    *   If the API key is not configured or the request fails.
    */
   public function request(array $query = []): array {
-	$apiKey = $this->state->get('geoapify_importer.api_key');
+  $apiKey = $this->state->get('geoapify_importer.api_key');
 
-	if (empty($apiKey)) {
-	  throw new \RuntimeException('Geoapify API key has not been configured.');
-	}
+  if (empty($apiKey)) {
+    throw new \RuntimeException('Geoapify API key has not been configured.');
+  }
 
-	$query['apiKey'] = $apiKey;
+  $query['apiKey'] = $apiKey;
 
-	try {
-	  $response = $this->httpClient->request('GET', self::PLACES_ENDPOINT, [
-		'query' => $query,
-		'headers' => [
-		  'Accept' => 'application/json',
-		],
-		'timeout' => 30,
-	  ]);
-	}
-	catch (GuzzleException $e) {
-	  $this->logger->error('Geoapify API request failed: @message', [
-		'@message' => $e->getMessage(),
-	  ]);
+  try {
+    $response = $this->httpClient->request('GET', self::PLACES_ENDPOINT, [
+    'query' => $query,
+    'headers' => [
+      'Accept' => 'application/json',
+    ],
+    'timeout' => 30,
+    ]);
+  }
+  catch (GuzzleException $e) {
+    $this->logger->error('Geoapify API request failed: @message', [
+    '@message' => $e->getMessage(),
+    ]);
 
-	  throw new \RuntimeException(
-		'The Geoapify API request failed.',
-		0,
-		$e
-	  );
-	}
+    throw new \RuntimeException(
+    'The Geoapify API request failed.',
+    0,
+    $e
+    );
+  }
 
-	$statusCode = $response->getStatusCode();
+  $statusCode = $response->getStatusCode();
 
-	if ($statusCode < 200 || $statusCode >= 300) {
-	  $this->logger->error(
-		'Geoapify API returned HTTP status @status.',
-		[
-		  '@status' => $statusCode,
-		]
-	  );
+  if ($statusCode < 200 || $statusCode >= 300) {
+    $this->logger->error(
+    'Geoapify API returned HTTP status @status.',
+    [
+      '@status' => $statusCode,
+    ]
+    );
 
-	  throw new \RuntimeException(
-		sprintf('Geoapify API returned HTTP status %d.', $statusCode)
-	  );
-	}
+    throw new \RuntimeException(
+    sprintf('Geoapify API returned HTTP status %d.', $statusCode)
+    );
+  }
 
-	$data = json_decode(
-	  $response->getBody()->getContents(),
-	  TRUE,
-	  512,
-	  JSON_THROW_ON_ERROR
-	);
+  $data = json_decode(
+    $response->getBody()->getContents(),
+    TRUE,
+    512,
+    JSON_THROW_ON_ERROR
+  );
 
-	return $data;
+  return $data;
   }
 
   /**
@@ -114,61 +119,137 @@ class GeoapifyClient {
    *   If the API key is not configured or the request fails.
    */
   public function reverseGeocode(float $lat, float $lon): array {
-	$apiKey = $this->state->get('geoapify_importer.api_key');
+  $apiKey = $this->state->get('geoapify_importer.api_key');
 
-	if (empty($apiKey)) {
-	  throw new \RuntimeException('Geoapify API key has not been configured.');
-	}
+  if (empty($apiKey)) {
+    throw new \RuntimeException('Geoapify API key has not been configured.');
+  }
 
-	try {
-	  $response = $this->httpClient->request('GET', self::REVERSE_GEOCODE_ENDPOINT, [
-		'query' => [
-		  'lat' => $lat,
-		  'lon' => $lon,
-		  'format' => 'json',
-		  'apiKey' => $apiKey,
-		],
-		'headers' => [
-		  'Accept' => 'application/json',
-		],
-		'timeout' => 30,
-	  ]);
-	}
-	catch (GuzzleException $e) {
-	  $this->logger->error('Geoapify reverse-geocode request failed: @message', [
-		'@message' => $e->getMessage(),
-	  ]);
+  try {
+    $response = $this->httpClient->request('GET', self::REVERSE_GEOCODE_ENDPOINT, [
+    'query' => [
+      'lat' => $lat,
+      'lon' => $lon,
+      'format' => 'json',
+      'apiKey' => $apiKey,
+    ],
+    'headers' => [
+      'Accept' => 'application/json',
+    ],
+    'timeout' => 30,
+    ]);
+  }
+  catch (GuzzleException $e) {
+    $this->logger->error('Geoapify reverse-geocode request failed: @message', [
+    '@message' => $e->getMessage(),
+    ]);
 
-	  throw new \RuntimeException(
-		'The Geoapify reverse-geocode request failed.',
-		0,
-		$e
-	  );
-	}
+    throw new \RuntimeException(
+    'The Geoapify reverse-geocode request failed.',
+    0,
+    $e
+    );
+  }
 
-	$statusCode = $response->getStatusCode();
+  $statusCode = $response->getStatusCode();
 
-	if ($statusCode < 200 || $statusCode >= 300) {
-	  $this->logger->error(
-		'Geoapify reverse-geocode API returned HTTP status @status.',
-		[
-		  '@status' => $statusCode,
-		]
-	  );
+  if ($statusCode < 200 || $statusCode >= 300) {
+    $this->logger->error(
+    'Geoapify reverse-geocode API returned HTTP status @status.',
+    [
+      '@status' => $statusCode,
+    ]
+    );
 
-	  throw new \RuntimeException(
-		sprintf('Geoapify reverse-geocode API returned HTTP status %d.', $statusCode)
-	  );
-	}
+    throw new \RuntimeException(
+    sprintf('Geoapify reverse-geocode API returned HTTP status %d.', $statusCode)
+    );
+  }
 
-	$data = json_decode(
-	  $response->getBody()->getContents(),
-	  TRUE,
-	  512,
-	  JSON_THROW_ON_ERROR
-	);
+  $data = json_decode(
+    $response->getBody()->getContents(),
+    TRUE,
+    512,
+    JSON_THROW_ON_ERROR
+  );
 
-	return $data;
+  return $data;
+  }
+  /**
+   * Forward-geocodes free text (e.g. a town name) to a place.
+   *
+   * Used to resolve a town's Geoapify boundary place_id for use as
+   * filter=place:{id} in Places API searches, as an alternative to a
+   * fixed-radius circle. See TownBoundaryResolver for the calling logic
+   * and how the result is evaluated for confidence before being trusted.
+   *
+   * @param string $text
+   *   The text to geocode, e.g. "Fort McMurray, Alberta, Canada".
+   * @param array<string, string> $options
+   *   Optional extra query parameters, e.g. ['type' => 'city'].
+   *
+   * @return array
+   *   Decoded Geoapify forward-geocode response.
+   *
+   * @throws \RuntimeException
+   *   If the API key is not configured or the request fails.
+   */
+  public function forwardGeocode(string $text, array $options = []): array {
+  $apiKey = $this->state->get('geoapify_importer.api_key');
+
+  if (empty($apiKey)) {
+    throw new \RuntimeException('Geoapify API key has not been configured.');
+  }
+
+  $query = $options;
+  $query['text'] = $text;
+  $query['format'] = 'json';
+  $query['apiKey'] = $apiKey;
+
+  try {
+    $response = $this->httpClient->request('GET', self::FORWARD_GEOCODE_ENDPOINT, [
+    'query' => $query,
+    'headers' => [
+      'Accept' => 'application/json',
+    ],
+    'timeout' => 30,
+    ]);
+  }
+  catch (GuzzleException $e) {
+    $this->logger->error('Geoapify forward-geocode request failed: @message', [
+    '@message' => $e->getMessage(),
+    ]);
+
+    throw new \RuntimeException(
+    'The Geoapify forward-geocode request failed.',
+    0,
+    $e
+    );
+  }
+
+  $statusCode = $response->getStatusCode();
+
+  if ($statusCode < 200 || $statusCode >= 300) {
+    $this->logger->error(
+    'Geoapify forward-geocode API returned HTTP status @status.',
+    [
+      '@status' => $statusCode,
+    ]
+    );
+
+    throw new \RuntimeException(
+    sprintf('Geoapify forward-geocode API returned HTTP status %d.', $statusCode)
+    );
+  }
+
+  $data = json_decode(
+    $response->getBody()->getContents(),
+    TRUE,
+    512,
+    JSON_THROW_ON_ERROR
+  );
+
+  return $data;
   }
 
 }

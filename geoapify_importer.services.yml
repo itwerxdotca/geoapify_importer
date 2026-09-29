@@ -20,6 +20,10 @@ services:
   geoapify_importer.place_identity:
    class: Drupal\geoapify_importer\Service\PlaceIdentity
 
+  geoapify_importer.town_boundary_resolver:
+    class: Drupal\geoapify_importer\Service\TownBoundaryResolver
+    arguments: ['@geoapify_importer.client', '@file_system', '@logger.channel.geoapify_importer']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']
