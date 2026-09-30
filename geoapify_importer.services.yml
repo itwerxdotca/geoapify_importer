@@ -24,6 +24,9 @@ services:
     class: Drupal\geoapify_importer\Service\TownBoundaryResolver
     arguments: ['@geoapify_importer.client', '@file_system', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.coordinate_transformer:
+    class: Drupal\geoapify_importer\Service\CoordinateTransformer
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']
