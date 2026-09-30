@@ -27,6 +27,10 @@ services:
   geoapify_importer.coordinate_transformer:
     class: Drupal\geoapify_importer\Service\CoordinateTransformer
 
+  geoapify_importer.town_import_runner:
+    class: Drupal\geoapify_importer\Service\TownImportRunner
+    arguments: ['@geoapify_importer.client', '@geoapify_importer.source_writer', '@geoapify_importer.change_detector', '@geoapify_importer.place_identity', '@geoapify_importer.poi_category_classifier', '@geoapify_importer.town_boundary_resolver', '@entity_type.manager', '@logger.channel.geoapify_importer']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']

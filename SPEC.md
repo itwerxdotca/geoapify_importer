@@ -2,7 +2,15 @@
 
 ## Revision Notes (latest revision)
 
-Changes since the previous revision, most important first:
+**Newest changes (this pass), most important first:**
+
+1. **Category classification decided and expanded.** `PoiCategoryClassifier` now has three outcomes: `ignored`, `needs_review`, `pending_mapping`. Business-model decisions confirmed: commercial categories default to `ignored` (reason `commercial`, destined for Listings); historic sites, government buildings, hospitals, police, fire stations, tourism info centres, and cemeteries are exceptions that stay POI-eligible; museums/zoos/aquariums/theme parks/galleries/theatres and a gray-area group (beach resorts, campgrounds, marinas, ski lifts, stadiums, golf courses, brewery/winery/distillery tours) always require manual `needs_review`, because the deciding factor (usually ownership) isn't in Geoapify's data.
+2. **Real bug found and fixed:** a blanket `building` ignore rule was silently mis-classifying real POI candidates (hospitals, churches, historic sites, government buildings) that carry a generic `building.*` tag alongside their specific category. Removed entirely; every genuine commercial case already matches independently.
+3. **Classification wired into `geoapify:fetch`** as a reported column — never a write gate. Every fetched place is still stored regardless of classification.
+4. **New finding: a fixed-radius circle is a measurably poor proxy for a town's real shape.** Confirmed on Calgary: a 20km circle and Calgary's real administrative boundary disagreed on 5 of ~198 supermarkets. `TownBoundaryResolver` (new) resolves and caches a town's real Geoapify boundary via Forward Geocoding, for use as `filter=place:{id}` instead of `filter=circle:...`. A joint confidence threshold (`match_type=full_match` AND `confidence=1`) was verified as necessary, not just cautious, via a real case: Tadmore, BC (a hamlet) returned `full_match` but `confidence=0`, and was correctly rejected only because both conditions are required together.
+5. **`canadian_towns` taxonomy structure clarified:** province-level parent terms exist above town terms (an earlier query grabbed "Alberta" and found no coordinates, which is why); `field_geolocation` stores plain `lat`/`lng` degrees plus Geolocation-module-computed trig fields; `field_type` holds real Statistics-Canada-style designations (Locality, Hamlet, Village, Town, City), confirmed via real data and not yet used by any code.
+
+**Previous pass's changes:**
 
 1. **Record identity corrected.** Geoapify's `place_id` is NOT stable across requests, so it cannot be the record identity (the original spec's preferred identity, and something this project asserted without testing). The storage key is now derived from the OpenStreetMap type and ID by a new `PlaceIdentity` service. See "Record Identity / Duplicate Detection".
 2. **Change detection built and verified** (`ChangeDetector`), including a 50 m distance tolerance for coordinates after an exact comparison produced a false "changed" result. See "Change Detection".
@@ -240,7 +248,7 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 
 3. **Simple "conducts business = Listing, doesn't = POI" rule.** Discussed, but immediately ran into real tension: applying it strictly would flip museums/zoos/aquariums/theme parks from POI (original spec) to Listing — a deliberate reversal the project owner confirmed wanting, BUT which creates cases too ambiguous to resolve by category alone (e.g., is a municipally-run museum different from a privately-owned one? Geoapify's category data cannot tell us ownership).
 
-4. **Explicit exceptions carved out regardless of "sells something":** historic places, government buildings, medical centers/hospitals, police stations, fire stations — confirmed by project owner as staying POI regardless of any commercial activity. Two sub-cases flagged as still needing a decision: private medical/dental clinics and pharmacies (arguably commercial, unlike hospitals) — **NOT YET RESOLVED.**
+4. **Explicit exceptions carved out regardless of "sells something":** historic places, government buildings, medical centers/hospitals, police stations, fire stations — confirmed by project owner as staying POI regardless of any commercial activity. **RESOLVED:** private medical/dental clinics and pharmacies are `ignored` (commercial), unlike hospitals — confirmed by project owner.
 
 5. **Investigated whether `field_business_ownership_types` could resolve the public/private ambiguity automatically.** **RULED OUT** — see Listing Content Type section above; that field is scoped for a different, future purpose and has no "not a business" term.
 
@@ -255,36 +263,40 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 
 9. **Applying the Google model to Listing's EXISTING structure (this session's most concrete conclusion):** Since Listing already has a real Paragraphs-based component system (`field_listing_components`), the "paid unlocks more" mechanism does not need to be invented — a paid Listing simply gets access to more/different paragraph types (or richer versions of `listing_gallery`/`listing_social`/`listing_amenities`) attached to this same existing field, likely gated by a new boolean flag (e.g. `field_is_paid`, not yet created) or a future real subscription/billing record. **This significantly de-risks the "paid components" part of the plan — it's additive to Listing's existing structure, not a rebuild.**
 
-### Current working classification rule (synthesized from the discussion, NOT YET COMPLETE OR CODED beyond the IGNORE list)
+### Classification rule — RESOLVED AND CODED (see Classification Engine section below for the full, current table)
 
-- Default: a Geoapify category that represents a commercial operation → classify toward **Listing**.
-- Explicit exceptions, regardless of commercial activity → stays **POI**: historic/heritage sites, government buildings, hospitals, police stations, fire stations, tourism information centres, cemeteries.
-- **Still unresolved:** private medical/dental clinics, pharmacies; and the full museum/zoo/aquarium/theme_park category set (original spec said POI; business-model discussion suggests Listing; not finalized).
-- **Still unresolved:** the mechanism for genuinely ambiguous individual places (e.g., is a specific zoo municipally-run or privately-owned) — current working assumption is these fall to `NEEDS_REVIEW` for manual, case-by-case human judgment, since Geoapify's category data alone cannot distinguish ownership structure, and `field_business_ownership_types` was ruled out as a shortcut for this (see above). This keeps the classification RULE simple and automatic for clear-cut cases, while accepting that some cases will always need a human decision — considered acceptable per project owner ("difficult... a lot of them cross over").
+- Default: a Geoapify category representing a commercial operation → `ignored` (reason `commercial`), destined for Listing.
+- Explicit exceptions, POI-eligible regardless of commercial activity: historic/heritage sites, government buildings, hospitals, police, fire stations, tourism info centres, cemeteries.
+- Private medical/dental clinics and pharmacies: `ignored` (commercial).
+- Museums/zoos/aquariums/theme parks/galleries/theatres, and a gray-area group (beach resorts, campgrounds, marinas, ski lifts, stadiums, golf courses, brewery/winery/distillery tours): confirmed by project owner as `needs_review` — always manual, case by case, because Geoapify's data cannot answer the deciding question (usually ownership). This is now a real, coded third classifier outcome, not just a working assumption.
 
-**This entire section needs a dedicated follow-up session to finalize the category-by-category IGNORE/DIRECT list before `PoiCategoryClassifier` can be meaningfully expanded beyond the single artwork rule.**
+**Still open:** whether/how a POI can later be upgraded to a paid Listing (Option 1 vs. Option 2 above) remains undecided and unbuilt; Listing's own field-ownership matrix is undesigned; `field_is_paid` or equivalent does not exist yet.
 
-## Classification Engine — IN PROGRESS
+## Classification Engine — CATEGORY DECISIONS RESOLVED; MAPPER NOT YET BUILT
 
-### Geoapify's full category list — OBTAINED THIS SESSION (authoritative, live-pulled)
+### Geoapify's full category list — authoritative, live-pulled
 
-833 categories confirmed via Geoapify's own `list_place_categories` endpoint (called live, using the project's real API key, via `v1/mcp` JSON-RPC). This is the authoritative source for all future mapping/classification work — superior to piecing categories together from documentation pages, which was the previous approach. Full list obtained and reviewed; available in conversation history if needed again, or re-fetchable via the same method at any time for a refresh.
+833 categories confirmed via Geoapify's own `list_place_categories` endpoint. Authoritative source for all mapping/classification work.
 
-### `PoiCategoryClassifier` — BUILT AND VERIFIED THIS SESSION
+### `PoiCategoryClassifier` — three outcomes, expanded and verified
 
-- Class: `Drupal\geoapify_importer\Service\Poi\PoiCategoryClassifier`.
-- Service: `geoapify_importer.poi_category_classifier` (no dependencies — pure logic).
-- **Scope, deliberately narrow:** answers only "should this ever become a POI at all?" via a small, code-level (not taxonomy-field-based) IGNORE list. Does NOT yet perform DIRECT/CONDITIONAL mapping to actual taxonomy terms — that requires the dynamic, taxonomy-field-driven mapper described above, not yet built.
-- **Why IGNORE is code, not a taxonomy field:** "should this category ever become a POI" is a data-quality/business rule, not an editorial taxonomy decision — kept separate from the (not-yet-built) DIRECT-mapping mechanism, which WILL be taxonomy-field-driven for the reasons in the "Local vs. Production Data Divergence" section.
-- **Matching logic:** hierarchy-aware (exact match, or dot-separated child of an ignored branch). Real-data testing revealed Geoapify's `categories` array already includes the full ancestor chain for every feature (not just the most specific leaf), so exact-matching against any array element is sufficient in practice; prefix-walking is kept as a safety net.
-- **Current IGNORE list:** `tourism.attraction.artwork` only (covers `.mural`, `.sculpture`, `.statue` children) — confirmed via the real Seven Grandfather Teachings data.
-- **Verified:** tested against two real stored records — the "Love" artwork piece (correctly `ignored`) and "Heritage Village" museum (correctly `pending_mapping`, since DIRECT mapping isn't built yet).
-- **Expansion pending:** the full IGNORE list expansion is blocked on finalizing the Business Model / Classification Strategy decisions above (see that section's "still unresolved" items) — deliberately not expanded further this session until those are settled, to avoid coding a rule that will need to be reversed.
+- Class: `Drupal\geoapify_importer\Service\Poi\PoiCategoryClassifier`. Service: `geoapify_importer.poi_category_classifier` (no dependencies).
+- **`classify(array $categories): array`** now returns one of three statuses, not two:
+  - **`ignored`** — never becomes a POI. Carries a `reason`: `not_a_place` (e.g. individual artwork), `commercial` (belongs in Listings), `infrastructure` (roads, utilities, parking — not a place or business), or `administrative_area` (regions/boundaries, not point attractions).
+  - **`needs_review`** — NEW. A known, real category that can never be auto-classified, because the deciding factor (usually public vs. private ownership) is not in Geoapify's data. A future DIRECT-mapping mapper must not bypass this list even once taxonomy tagging exists for these categories.
+  - **`pending_mapping`** — confirmed POI-eligible, no taxonomy term assigned yet (the not-yet-built mapper's job).
+- **Business-model policy, confirmed with the project owner and encoded in the classifier:**
+  - Default: a commercial category is `ignored` (reason `commercial`), destined for the Listing content type, not POI.
+  - Explicit exceptions — POI-eligible regardless of commercial activity, achieved simply by never appearing in any ignore list: historic/heritage sites, government buildings (`office.government.*`), hospitals (`healthcare.hospital`), police (`service.police`), fire stations (`service.fire_station`), tourism info centres (`tourism.information.*`), cemeteries (`memorial.cemetery`, `.graveyard`). `office.government.*` and `service.police`/`.fire_station` needed an explicit `IGNORE_EXCEPTIONS` carve-out, checked first, because they sit under otherwise-ignored parents (`office`, `service`).
+  - Always `needs_review`, confirmed by the project owner: `entertainment.museum`, `.zoo`, `.aquarium`, `.theme_park`, `.culture.arts_centre`, `.culture.gallery`, `.culture.theatre` (classic attractions that also charge admission — ownership determines the real answer); `beach.beach_resort`, `camping`, `maritime.marina`, `ski.lift`, `sport.stadium`, `sport.golf_course`, `production.brewery`/`.winery`/`.distillery` (gray-area group, explicitly left for manual, case-by-case review rather than a blanket rule).
+  - Private medical/dental clinics and pharmacies (`healthcare.clinic_or_praxis`, `.dentist`, `.pharmacy`) confirmed `ignored` (commercial) — unlike hospitals, these are private commercial practices.
+- **Real bug found and fixed:** the ignore list originally included a blanket `building` entry. Geoapify tags many places with a generic `building.*` category ALONGSIDE their specific one (e.g. a museum carries both `building.tourism` and `entertainment.museum`; a church carries `building.place_of_worship` and `religion.place_of_worship.*`). Because `building` is a parent of children like `building.healthcare`, `building.historic`, `building.place_of_worship`, and `building.public_and_civil`, the blanket rule would have silently ignored real POI candidates whenever the generic tag was checked before the specific one — including hospitals, churches, historic sites, and government buildings, none of which are on any ignore list. Found via real data (Oil Sands Discovery Centre carries `building.tourism`) and only avoided by luck of matching order. Removed entirely rather than narrowed, since every genuine commercial `building.*` case already matches independently via its own specific category.
+- **PROVENANCE:** most of this table was built from the full 833-category list plus this policy discussion, not from categories actually seen in fetched data — unlike the original single artwork entry. Treat as a first, reviewable pass; expand/correct as real data turns up mismatches.
+- **Verified:** real stored records (Marine Park Museum → `needs_review`; Landmark Theatres → `ignored (commercial)`, confirmed via its real categories as `entertainment.cinema`, not a live theatre; The Alley YMM → `ignored (commercial)`, a bowling alley; Oil Sands Discovery Centre → `needs_review`, a real museum). Synthetic cases for the exception carve-out (government office, police → `pending_mapping`; law office, pharmacy → `ignored (commercial)`) and for the `building` fix (church with a `building` tag, bare `building.healthcare` → both now correctly `pending_mapping`; a restaurant with a `building` tag still correctly `ignored (commercial)`).
 
-### Confirmed exclusions from IGNORE, per explicit project owner instruction
+### Classification wired into `geoapify:fetch`
 
-- `tourism.information.*` (visitor/info centres) — people do seek these out; stays out of IGNORE regardless of the business-model discussion.
-- `memorial.cemetery`, `memorial.graveyard` — same; stays out of IGNORE.
+The fetch command now runs `PoiCategoryClassifier` on every fetched place and reports it in a new Classification column. **Classification never gates whether a place is written or skipped** — only `ChangeDetector` does that. Every fetched place is stored regardless of what it classifies as, per the decision to store first and sort on top of stored data.
 
 ## Change Detection — BUILT AND VERIFIED
 
@@ -298,6 +310,25 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 - **Not verified:** behaviour at scale, or with large polygon features.
 - **Implication for future sync:** `field_poi_location` is SOURCE_AUTHORITATIVE in the ownership matrix. Node-update logic must consult `ChangeDetector` before writing, not overwrite blindly, or the same jitter would rewrite saved locations.
 
+## Town Search Area — NEW: BOUNDARY VS. CIRCLE
+
+**Finding:** a fixed-radius circle around a town's centre point is a measurably poor proxy for its real shape. Confirmed on Calgary — bounding box roughly 32km x 41km, already larger than a 20km-radius (40km diameter) circle in one dimension. A direct comparison of `commercial.supermarket` results (circle vs. Calgary's real administrative boundary) found 199 vs. 198 total, with 5 places disagreeing: 3 caught by the circle but outside the real boundary, 2 inside the real boundary but outside the circle's reach. Small for Calgary specifically; likely larger for a town spread out lengthwise (project owner named Fort McMurray itself, plus outlying communities like Anzac and Gregoire, as a concrete concern — not yet tested, since Fort McMurray's compact `entertainment` category result set didn't expose the shape difference the way Calgary's spread-out supermarkets did).
+
+**`canadian_towns` taxonomy, clarified this pass:**
+- Province-level parent terms exist above town terms (e.g. "Alberta"), which is why an early, unfiltered query returned a term with no coordinates.
+- `field_geolocation` (Geolocation module) stores `lat`/`lng` as plain decimal degrees, plus module-computed `lat_sin`/`lat_cos`/`lng_rad`/`value`. No transform needed to read a town's coordinates (unlike writing to POI's `field_poi_location`, which still needs one).
+- `field_type` holds real designations: Locality, Hamlet, Village, Town, City (confirmed via real production data). Not yet used by any code; a plausible future use is skipping boundary resolution entirely for `Locality`, which likely has no formal administrative polygon.
+- Whether Anzac/Gregoire are their own `canadian_towns` terms, or expected to be covered under Fort McMurray, was raised but **not yet checked**.
+
+**`GeoapifyClient::forwardGeocode()`** — new method, Forward Geocoding API (`https://api.geoapify.com/v1/geocode/search`). Resolves free text (a town name) to a place, used specifically to find a town's administrative boundary.
+
+**`TownBoundaryResolver`** — new service, `geoapify_importer.town_boundary_resolver`. Lives directly under `Service/` (shared infrastructure, not POI-specific).
+- `resolve(int $tid, string $town_name, ?string $province_code): ?string` — returns a Geoapify place_id suitable for `filter=place:{id}`, or NULL if no sufficiently confident boundary could be resolved.
+- Caches successful resolutions to `private://geoapify_importer/towns/{tid}/boundary.json` (atomic write, same pattern as `SourceFileWriter`). Does not cache failures.
+- **Confidence threshold:** requires `match_type='full_match'` AND `confidence=1`, together. **Verified as necessary, not just cautious**, via a real case: Tadmore, BC (a Hamlet) returned `full_match` but `confidence=0`, and was correctly rejected only because both conditions are required jointly — `match_type` alone would have wrongly accepted it. Tahsis, BC (Village) and Taber, AB (Town) both resolved correctly at this threshold, alongside the earlier Fort McMurray and Calgary results.
+- **Does NOT perform the circle fallback itself** — callers must do that when `resolve()` returns NULL. That fallback wiring, and the per-town import loop that would actually use this resolver, are NOT YET BUILT. This is the resolver verified in isolation via `drush php:eval`, not yet wired into `geoapify:fetch` or any import command.
+- **Not yet tested:** a town name colliding with a larger, more famous place elsewhere; a town entirely absent from OpenStreetMap's data.
+
 ## Dev Tooling — NEW THIS SESSION
 
 ### `drush geoapify:fetch` — Drush command, built and verified
@@ -307,9 +338,9 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 - Usage: `drush geoapify:fetch <count> [--categories=] [--lat=] [--lon=] [--radius=]`.
 - Defaults: `categories=entertainment,tourism`, Fort McMurray-area center, 15km radius.
 - `count` is clamped to Geoapify's real documented range (1–500), with a warning if adjusted, rather than erroring.
-- For each fetched place: derives the storage key via `PlaceIdentity`, runs `ChangeDetector` against `SourceFileWriter::readLatest()`, skips unchanged places (no write, no new history file), and writes new or changed ones via `SourceFileWriter::write()`.
-- Output: a table (Name / Status / Action / Storage Key; changed rows list which fields changed) and a summary line such as `0 new, 0 changed, 7 unchanged (skipped), 0 error(s) out of 7 fetched place(s).` A failure on one place becomes an `error` row and does not abort the batch.
-- **Scope, explicitly narrow:** this is a manual dev/test tool for exercising fetch+store — it does NOT classify, map, or create nodes. The eventual full `geoapify:import` command (per original spec) is separate, not-yet-built, and will layer classification/mapping/node-creation on top of what this command already proves works.
+- For each fetched place: derives the storage key via `PlaceIdentity`, runs `ChangeDetector` against `SourceFileWriter::readLatest()`, skips unchanged places (no write, no new history file), writes new or changed ones via `SourceFileWriter::write()`, and runs `PoiCategoryClassifier` for a Classification column (reported for every place, regardless of write action — classification never gates a write).
+- Output: a table (Name / Status / Action / Classification / Storage Key; changed rows list which fields changed) and a summary line such as `0 new, 0 changed, 7 unchanged (skipped), 0 error(s) out of 7 fetched place(s).` A failure on one place becomes an `error` row and does not abort the batch.
+- **Scope, explicitly narrow:** this is a manual dev/test tool for exercising fetch+store+classify against ONE fixed search area at a time — it does NOT map to taxonomy terms, create nodes, or loop over towns. The eventual full `geoapify:import` command (per original spec) is separate, not-yet-built, and will layer per-town looping (see Town Search Area below), taxonomy mapping, and node-creation on top of what this command already proves works.
 - **Live-tested at `limit=20`** (returned 7 real features — see Classification Engine discovery above).
 - **Default `categories=entertainment,tourism` is suspect** because of the multi-category open item under "Places API".
 
@@ -359,7 +390,10 @@ Two further rules from this revision:
 - Reverse-geocode fallback corrected to use real, confirmed signal (housenumber+street), replacing an invalid design based on fields the API doesn't return
 - Settings form/config fully consistent across local site, stored config, and GitHub (a real discrepancy between these three was found and fixed)
 - `geoapify:fetch` Drush command built, verified working end-to-end at `limit=20` against real data
-- `PoiCategoryClassifier` built and verified against real data (artwork → ignored; museum → pending_mapping)
+- `PoiCategoryClassifier` expanded to three outcomes (ignored/needs_review/pending_mapping) with all business-model category decisions coded and verified against real data; a real `building`-tag misclassification bug found and fixed
+- Classification wired into `geoapify:fetch` as a reported column (never a write gate)
+- `TownBoundaryResolver` and `GeoapifyClient::forwardGeocode()` built and verified: real boundary-vs-circle discrepancy confirmed on Calgary (5 of ~198 supermarkets disagreed); confidence threshold verified as necessary via a real case (Tadmore, BC)
+- `canadian_towns` taxonomy structure clarified: province-parent terms, `field_geolocation` structure, `field_type` designations (Locality/Hamlet/Village/Town/City)
 - Geoapify's full 833-category list obtained live and authoritatively
 - Production's real field structures for both `point_of_interest` and `listing` confirmed via direct, read-only SSH/Drush inspection
 - Production/local version parity confirmed (Drupal 11.4.7, PHP 8.4.26, Drush 13.8.0.0 on both)
@@ -371,8 +405,10 @@ Two further rules from this revision:
 
 ### Not yet implemented / not yet resolved
 
-- **Business Model / Classification Strategy finalization** (see dedicated section above) — the single biggest open item, blocking further IGNORE-list expansion and all DIRECT-mapping work
-- Dynamic taxonomy-field-driven mapper itself (`field_geoapify_categories` on POI Category terms; the actual `PoiCategoryMapper` service performing DIRECT/CONDITIONAL lookups) — designed in discussion, not yet built
+- **Dynamic taxonomy-field-driven mapper** (`field_geoapify_categories` on POI Category terms; the actual `PoiCategoryMapper` service performing DIRECT/CONDITIONAL lookups) — this is now the single biggest open item; category-level policy decisions are resolved, but nothing yet assigns an actual taxonomy term
+- Per-town import loop using `TownBoundaryResolver` + circle fallback — resolver exists in isolation, not wired into any command
+- Whether Anzac/Gregoire are their own `canadian_towns` terms or expected to be covered under Fort McMurray — raised, not checked
+- Whether `field_type` (Locality/Hamlet/Village/Town/City) should skip boundary resolution for `Locality` terms — plausible, not decided or built
 - Whether/how a POI can be "upgraded" to a Listing (Option 1 vs. Option 2 from the discussion above) — not finalized, not built
 - Listing's own field-ownership matrix
 - `field_is_paid` (or equivalent) flag/mechanism gating Listing's paid components
