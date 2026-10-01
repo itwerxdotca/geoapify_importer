@@ -48,6 +48,14 @@ use Psr\Log\LoggerInterface;
  * field_geolocation coordinates with a default radius. This resolver
  * does not perform that fallback itself — it only ever returns a
  * trustworthy boundary id, or NULL.
+ * NAME-COLLISION RISK, MITIGATED: multiple Canadian towns can share a
+ * name across provinces. A text-based geocode could confidently resolve
+ * to the WRONG same-named town, with match_type/confidence looking
+ * perfect regardless. Mitigated by requiring the candidate's own
+ * returned coordinates to be within MAX_PLAUSIBLE_DISTANCE_METERS of the
+ * town term's own trusted field_geolocation — a check independent of
+ * Geoapify's own confidence scoring, which cannot be trusted to catch
+ * this failure mode on its own.
  */
 class TownBoundaryResolver {
 
@@ -76,6 +84,20 @@ class TownBoundaryResolver {
    */
   protected const MINIMUM_CONFIDENCE = 1.0;
 
+  /**
+   * Maximum plausible distance (metres) between a geocoded candidate's
+   * own coordinates and the town term's trusted field_geolocation, before
+   * the match is rejected as likely the wrong same-named town.
+   *
+   * Judgment call, not verified against a real cross-province name
+   * collision. Based on Calgary's own measured extent (bounding box
+   * roughly 32km x 41km) — large enough that a real town's own
+   * boundary centroid can legitimately sit this far from a specific
+   * stored point within it, small enough to catch a same-named town in
+   * a different province, which would differ by hundreds of kilometres.
+   */
+  protected const MAX_PLAUSIBLE_DISTANCE_METERS = 50000.0;
+
   public function __construct(
     protected GeoapifyClient $client,
     protected FileSystemInterface $fileSystem,
@@ -91,15 +113,25 @@ class TownBoundaryResolver {
    *   The town's plain name, e.g. "Fort McMurray".
    * @param string|null $province_code
    *   Optional province/state code (e.g. "AB") to disambiguate towns
-   *   with common names. Recommended when available.
+   *   with common names. Recommended when available. NOTE: passing this
+   *   has only been verified to reduce ambiguity when combined with the
+   *   plausibility check below — it is not trusted alone to prevent a
+   *   same-named-town mismatch.
+   * @param float $known_lat
+   *   The town term's own trusted latitude (from field_geolocation).
+   *   REQUIRED: used to reject a confidently-matched but geographically
+   *   implausible result — see class docblock, "NAME-COLLISION RISK".
+   * @param float $known_lon
+   *   The town term's own trusted longitude.
    *
    * @return string|null
    *   The Geoapify place_id to use as filter=place:{id}, or NULL if no
-   *   sufficiently confident boundary could be resolved. NULL is a
-   *   normal, expected outcome for some towns, not necessarily an error
-   *   — callers should fall back to a circle search.
+   *   sufficiently confident AND geographically plausible boundary could
+   *   be resolved. NULL is a normal, expected outcome for some towns,
+   *   not necessarily an error — callers should fall back to a circle
+   *   search centred on $known_lat/$known_lon.
    */
-  public function resolve(int $tid, string $town_name, ?string $province_code = NULL): ?string {
+  public function resolve(int $tid, string $town_name, ?string $province_code, float $known_lat, float $known_lon): ?string {
     $cached = $this->readCache($tid);
     if ($cached !== NULL) {
       return $cached['place_id'];
@@ -144,6 +176,36 @@ class TownBoundaryResolver {
       return NULL;
     }
 
+    // Plausibility check, independent of Geoapify's own confidence score:
+    // reject a confidently-matched candidate if it sits far from where
+    // this town actually is. Catches a same-named town in another
+    // province, which match_type/confidence alone cannot be trusted to
+    // catch (both can report a perfect score for the WRONG town).
+    $result_lat = $result['lat'] ?? NULL;
+    $result_lon = $result['lon'] ?? NULL;
+
+    if ($result_lat === NULL || $result_lon === NULL) {
+      $this->logger->warning('Boundary resolution for tid @tid (@name) returned no coordinates to verify plausibility against; rejecting conservatively.', [
+        '@tid' => $tid,
+        '@name' => $town_name,
+      ]);
+      return NULL;
+    }
+
+    $distance = $this->distanceMeters(
+      ['lon' => $known_lon, 'lat' => $known_lat],
+      ['lon' => (float) $result_lon, 'lat' => (float) $result_lat]
+    );
+
+    if ($distance > self::MAX_PLAUSIBLE_DISTANCE_METERS) {
+      $this->logger->warning('Boundary resolution for tid @tid (@name) rejected: candidate is @distance km from the town\'s known location — likely a same-named town elsewhere.', [
+        '@tid' => $tid,
+        '@name' => $town_name,
+        '@distance' => round($distance / 1000, 1),
+      ]);
+      return NULL;
+    }
+
     $place_id = $result['place_id'] ?? NULL;
     if ($place_id === NULL) {
       return NULL;
@@ -155,10 +217,28 @@ class TownBoundaryResolver {
       'result_type' => $result['result_type'] ?? NULL,
       'match_type' => $result['rank']['match_type'] ?? NULL,
       'confidence' => $result['rank']['confidence'] ?? NULL,
+      'distance_from_known_meters' => round($distance, 1),
       'resolved_at' => gmdate('Ymd\THis\Z'),
     ]);
 
     return $place_id;
+  }
+
+  /**
+   * Great-circle distance in metres between two ['lon' => ..., 'lat' => ...]
+   * points (haversine). Mirrors ChangeDetector's implementation; not
+   * shared via a common utility yet — both are small and independently
+   * verified, and extracting a shared helper was left for later cleanup
+   * rather than risking the already-working ChangeDetector mid-fix.
+   */
+  protected function distanceMeters(array $a, array $b): float {
+    $earth_radius = 6371000.0;
+    $lat1 = deg2rad($a['lat']);
+    $lat2 = deg2rad($b['lat']);
+    $d_lat = $lat2 - $lat1;
+    $d_lon = deg2rad($b['lon'] - $a['lon']);
+    $h = sin($d_lat / 2) ** 2 + cos($lat1) * cos($lat2) * sin($d_lon / 2) ** 2;
+    return 2 * $earth_radius * asin(min(1.0, sqrt($h)));
   }
 
   /**

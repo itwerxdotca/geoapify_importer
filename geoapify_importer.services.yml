@@ -31,6 +31,10 @@ services:
     class: Drupal\geoapify_importer\Service\TownImportRunner
     arguments: ['@geoapify_importer.client', '@geoapify_importer.source_writer', '@geoapify_importer.change_detector', '@geoapify_importer.place_identity', '@geoapify_importer.poi_category_classifier', '@geoapify_importer.town_boundary_resolver', '@entity_type.manager', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.poi_category_mapper:
+    class: Drupal\geoapify_importer\Service\Poi\PoiCategoryMapper
+    arguments: ['@entity_type.manager', '@logger.channel.geoapify_importer']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']
