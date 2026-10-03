@@ -195,6 +195,7 @@ class TownImportRunner {
       'categories_queried' => 0,
       'categories_failed' => 0,
       'places_seen' => 0,
+      'processed' => [],
       'new' => 0,
       'changed' => 0,
       'unchanged' => 0,
@@ -276,9 +277,18 @@ class TownImportRunner {
             $this->writer->write($key, $feature);
           }
 
-          // Classification is computed for visibility/logging parity with
-          // geoapify:fetch, but never gates a write — see class docblock.
-          $this->classifier->classify($feature['properties']['categories'] ?? []);
+          // Classification never gates the write above (see class
+          // docblock). It's collected here, for EVERY processed place
+          // regardless of change status, so a downstream consumer (e.g.
+          // PoiImportProcessor) can act on it without re-fetching or
+          // re-classifying — a place with an unchanged file can still
+          // lack a node and need one created.
+          $classification = $this->classifier->classify($feature['properties']['categories'] ?? []);
+          $summary['processed'][] = [
+            'key' => $key,
+            'feature' => $feature,
+            'classification' => $classification,
+          ];
 
           $summary[$status]++;
         }

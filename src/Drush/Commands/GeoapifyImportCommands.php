@@ -3,6 +3,7 @@
 namespace Drupal\geoapify_importer\Drush\Commands;
 
 use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
+use Drupal\geoapify_importer\Service\Poi\PoiImportProcessor;
 use Drupal\geoapify_importer\Service\TownImportRunner;
 use Drush\Attributes as CLI;
 use Drush\Commands\DrushCommands;
@@ -11,14 +12,19 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 /**
  * Drush command for running the per-town Geoapify import.
  *
- * SCOPE: ingestion only — fetch, identity, change detection,
- * classification (reported), and storage. Does NOT assign taxonomy terms
- * or create nodes. See TownImportRunner class docblock.
+ * Two stages, deliberately separated (see TownImportRunner and
+ * PoiImportProcessor class docblocks): TownImportRunner handles fetch,
+ * identity, change detection, classification, and storage — shared
+ * infrastructure, no POI-specific knowledge. PoiImportProcessor consumes
+ * its output and runs POI-specific mapping + node creation. A future
+ * Listing importer would reuse TownImportRunner's output with its own
+ * processor instead.
  */
 final class GeoapifyImportCommands extends DrushCommands implements ContainerInjectionInterface {
 
   public function __construct(
     private readonly TownImportRunner $runner,
+    private readonly PoiImportProcessor $poiProcessor,
   ) {
     parent::__construct();
   }
@@ -29,6 +35,7 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
   public static function create(ContainerInterface $container): self {
     return new self(
       $container->get('geoapify_importer.town_import_runner'),
+      $container->get('geoapify_importer.poi_import_processor'),
     );
   }
 
@@ -39,9 +46,13 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
    * TownBoundaryResolver, falling back to a 15km circle if that fails;
    * queries a curated set of POI-relevant categories one at a time
    * (never combined — see TownImportRunner); and stores new/changed
-   * places via SourceFileWriter. Unchanged places are skipped. Every
-   * place is classified for visibility, but classification never
-   * prevents a write.
+   * places via SourceFileWriter. Unchanged places are skipped for
+   * storage, but every place (changed or not) is still classified and
+   * passed to PoiImportProcessor, which maps and creates a POI node for
+   * anything resolvable (see PoiImportProcessor, PoiCategoryMapper,
+   * PoiNodeCreator). Created nodes are always unpublished. Places needing
+   * manual review or with no tagged taxonomy term do NOT get a node yet
+   * — they remain as raw files, reprocessable once resolved.
    *
    * @option town
    *   Only import a town whose name contains this text (case-insensitive).
@@ -106,6 +117,13 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
       'boundary_used' => 0,
       'circle_used' => 0,
       'possibly_truncated' => 0,
+      'ignored' => 0,
+      'needs_review' => 0,
+      'unmapped' => 0,
+      'nodes_created' => 0,
+      'nodes_skipped_existing' => 0,
+      'no_name' => 0,
+      'poi_errors' => 0,
     ];
 
     $count = 0;
@@ -132,8 +150,17 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
       $totals[$summary['search_method'] . '_used']++;
       $totals['possibly_truncated'] += count($summary['possibly_truncated']);
 
+      $poi_counts = $this->poiProcessor->process($summary['processed'], $dry_run);
+      $totals['ignored'] += $poi_counts['ignored'];
+      $totals['needs_review'] += $poi_counts['needs_review'];
+      $totals['unmapped'] += $poi_counts['unmapped'];
+      $totals['nodes_created'] += $poi_counts['nodes_created'];
+      $totals['nodes_skipped_existing'] += $poi_counts['nodes_skipped_existing'];
+      $totals['no_name'] += $poi_counts['no_name'];
+      $totals['poi_errors'] += $poi_counts['errors'];
+
       $this->io()->text(sprintf(
-        '%s [%s]: %d new, %d changed, %d unchanged, %d errors (%d/%d categories ok)%s',
+        '%s [%s]: %d new, %d changed, %d unchanged, %d errors (%d/%d categories ok)%s | POI: %d created, %d existing, %d needs_review, %d unmapped, %d ignored, %d no-name',
         $summary['town'],
         $summary['search_method'],
         $summary['new'],
@@ -142,7 +169,13 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
         $summary['errors'],
         $summary['categories_queried'],
         $summary['categories_queried'] + $summary['categories_failed'],
-        $summary['possibly_truncated'] ? ' — possibly truncated: ' . implode(', ', $summary['possibly_truncated']) : ''
+        $summary['possibly_truncated'] ? ' — possibly truncated: ' . implode(', ', $summary['possibly_truncated']) : '',
+        $poi_counts['nodes_created'],
+        $poi_counts['nodes_skipped_existing'],
+        $poi_counts['needs_review'],
+        $poi_counts['unmapped'],
+        $poi_counts['ignored'],
+        $poi_counts['no_name']
       ));
     }
 
@@ -159,10 +192,17 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
         ['Per-place errors', $totals['errors']],
         ['Failed category requests', $totals['categories_failed']],
         ['Category results possibly truncated', $totals['possibly_truncated']],
+        ['POI nodes created', $totals['nodes_created']],
+        ['POI nodes already existing (skipped)', $totals['nodes_skipped_existing']],
+        ['Places needing manual review', $totals['needs_review']],
+        ['Places unmapped (no tagged term)', $totals['unmapped']],
+        ['Places ignored (not POI-eligible)', $totals['ignored']],
+        ['Mapped but no usable name (expected, not an error)', $totals['no_name']],
+        ['POI processing errors', $totals['poi_errors']],
       ]
     );
 
-    if ($totals['towns_failed'] > 0 || $totals['errors'] > 0 || $totals['categories_failed'] > 0) {
+    if ($totals['towns_failed'] > 0 || $totals['errors'] > 0 || $totals['categories_failed'] > 0 || $totals['poi_errors'] > 0) {
       $this->io()->warning('Run completed with errors. See above and the geoapify_importer log channel for detail.');
     }
     else {
