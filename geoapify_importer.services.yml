@@ -35,6 +35,10 @@ services:
     class: Drupal\geoapify_importer\Service\Poi\PoiCategoryMapper
     arguments: ['@entity_type.manager', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.poi_node_creator:
+    class: Drupal\geoapify_importer\Service\Poi\PoiNodeCreator
+    arguments: ['@entity_type.manager', '@geoapify_importer.coordinate_transformer', '@geoapify_importer.address_verifier', '@logger.channel.geoapify_importer']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']
