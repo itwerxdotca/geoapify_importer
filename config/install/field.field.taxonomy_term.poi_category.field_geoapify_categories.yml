@@ -1,0 +1,20 @@
+langcode: en
+status: true
+dependencies:
+  config:
+    - field.storage.taxonomy_term.field_geoapify_categories
+    - taxonomy.vocabulary.poi_category
+  module:
+    - taxonomy
+id: taxonomy_term.poi_category.field_geoapify_categories
+field_name: field_geoapify_categories
+entity_type: taxonomy_term
+bundle: poi_category
+label: 'Geoapify Categories'
+description: 'Geoapify category strings this term should match.'
+required: false
+translatable: false
+default_value: {  }
+default_value_callback: ''
+settings: {  }
+field_type: string

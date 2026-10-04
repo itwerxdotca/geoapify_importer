@@ -6,27 +6,6 @@ use Psr\Log\LoggerInterface;
 
 /**
  * Turns TownImportRunner's classified places into real POI nodes.
- *
- * SCOPE: this is the POI-specific second half of the import pipeline.
- * TownImportRunner (shared infrastructure, src/Service/) handles fetch,
- * identity, change detection, storage, and classification — it returns a
- * 'processed' list of every place it saw, each with its classification
- * result, but takes no action beyond storing the raw file. This class
- * consumes that list and decides what happens next, per place:
- *
- * - ignored: nothing. Never becomes a POI.
- * - needs_review: nothing, by design. Requires a human decision this
- *   pipeline cannot make (see PoiCategoryClassifier).
- * - pending_mapping: run PoiCategoryMapper. If it resolves to a real
- *   term, run PoiNodeCreator. If it does not (UNMAPPED), do nothing —
- *   per spec, an unmapped category must never silently become an
- *   arbitrary POI category. The place stays as a raw file, available
- *   for mapping once a term is tagged and this is re-run.
- *
- * A future Listing importer would consume the SAME processed list from
- * TownImportRunner but run its own Listing-specific mapper/creator here
- * instead — this is why TownImportRunner itself knows nothing about
- * taxonomy mapping or node creation.
  */
 class PoiImportProcessor {
 
@@ -39,16 +18,9 @@ class PoiImportProcessor {
   /**
    * Processes every place TownImportRunner collected for one town.
    *
-   * @param array $processed
-   *   The 'processed' array from a TownImportRunner::importTown() result
-   *   — each entry has 'key', 'feature', and 'classification'.
-   * @param bool $dry_run
-   *   If TRUE, mapping is still attempted (for accurate reporting) but
-   *   PoiNodeCreator is never called — nothing is persisted.
-   *
    * @return array
    *   Counts: ignored, needs_review, unmapped, nodes_created,
-   *   nodes_skipped_existing, errors.
+   *   nodes_skipped_existing, no_name, errors.
    */
   public function process(array $processed, bool $dry_run = FALSE): array {
     $counts = [
@@ -75,8 +47,6 @@ class PoiImportProcessor {
       }
 
       if ($status !== PoiCategoryClassifier::STATUS_PENDING_MAPPING) {
-        // Unrecognized status — treat conservatively as needing review
-        // rather than silently skipping or guessing.
         $counts['needs_review']++;
         continue;
       }
@@ -100,8 +70,16 @@ class PoiImportProcessor {
       }
 
       if ($dry_run) {
-        // Would create, but nothing is persisted in a dry run.
-        $counts['nodes_created']++;
+        $existing_nid = $this->creator->findExistingNodeId($entry['key']);
+        if ($existing_nid !== NULL) {
+          $counts['nodes_skipped_existing']++;
+        }
+        elseif (empty($entry['feature']['properties']['name'] ?? NULL)) {
+          $counts['no_name']++;
+        }
+        else {
+          $counts['nodes_created']++;
+        }
         continue;
       }
 
@@ -124,9 +102,6 @@ class PoiImportProcessor {
         $counts['nodes_skipped_existing']++;
       }
       elseif (($result['message'] ?? NULL) === 'Feature has no name to use as a title.') {
-        // Expected, not a failure: some real OSM features (a school
-        // field, an unnamed park segment) have no name at all. Counted
-        // separately so it isn't mistaken for a genuine error.
         $counts['no_name']++;
       }
       else {

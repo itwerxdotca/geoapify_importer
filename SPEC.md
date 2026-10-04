@@ -2,7 +2,13 @@
 
 ## Revision Notes (latest revision)
 
-**Newest changes (this pass), most important first — this was a large stretch of work:**
+**Newest changes (this pass):**
+
+1. **Production field deployment groundwork built.** Five config/install YAML files (field storage + field instance definitions) added for the two fields this module genuinely owns: `field_source_storage_key` (now attached to BOTH `point_of_interest` AND `listing` — a deliberate choice, since it's a node-level dedup concept, not POI-specific, and the project's own architecture goal is for a future Listing importer to reuse the same mechanism) and `field_geoapify_categories` (on the `poi_category` taxonomy). A `geoapify_importer.install` file was added with `hook_requirements()` (checks that `field_poi_location`/`field_poi_address`/`field_poi_category` — fields this module does NOT own and must not try to create — actually exist, failing loudly if not) and `hook_update_10001()` (creates the two owned fields programmatically on an already-installed site, since `config/install` only applies automatically on a brand-new install).
+2. **A real dry-run accuracy bug found and fixed.** `PoiImportProcessor`'s dry-run path assumed every successfully-mapped place would be newly created, without ever checking whether a node already existed — because the existence check previously lived only inside `PoiNodeCreator::create()`, which dry-run skipped entirely. Found via a real test: re-running `--dry-run` against Taber (already fully imported) reported "17 created" for places that already had real nodes. Fixed by making `PoiNodeCreator::findExistingNodeId()` public and having dry-run call it directly; also fixed dry-run to check for the "no usable name" case the same way a real run does, rather than only being accurate for the `nodes_created`/`nodes_skipped_existing` split.
+3. **Session note:** this project is being handed off to a new account/session at this point. Everything below reflects the module's real, current state as verified this session — treat it as a reliable starting point for continuation, not as requiring re-verification from scratch.
+
+**Previous pass's newest changes — this was a large stretch of work:**
 
 1. **The import pipeline is now complete end-to-end, not just ingestion.** `PoiCategoryMapper` (DIRECT taxonomy mapping via a new `field_geoapify_categories` field on the `poi_category` vocabulary) and `PoiNodeCreator` (create-only node creation, never update) are built and verified. `PoiImportProcessor` orchestrates mapping+creation per place, consuming `TownImportRunner`'s output. `geoapify:import` now creates real, unpublished POI nodes, not just raw files. **Current real scale: 139 POI nodes created, 1,115 raw places stored, across multiple towns (testing has gone beyond Taber to other cities).**
 2. **A real duplicate-record bug was found and fixed via the `building` tag issue, and a second real bug was found and fixed: `PoiNodeCreator` originally counted "no usable name" (a real, common case for unnamed OSM features) as a generic error — now counted separately (`no_name`) since it isn't a failure.**
@@ -323,7 +329,7 @@ The fetch command now runs `PoiCategoryClassifier` on every fetched place and re
 - Class: `Drupal\geoapify_importer\Service\Poi\PoiNodeCreator`. Service: `geoapify_importer.poi_node_creator`.
 - **Scope, deliberately narrow: CREATE ONLY, never updates an existing node.** Updating requires applying the field ownership matrix per-field (title never changes after creation; location always re-syncs; category/address need review-aware fill-if-empty logic) — a distinct, NOT YET BUILT piece.
 - Only called for places already resolved to a real term by `PoiCategoryMapper` — `needs_review` and `UNMAPPED` places get no node yet.
-- New field `field_source_storage_key` (string) on `point_of_interest`, storing the `PlaceIdentity` key a node came from — the node-level duplicate-detection mechanism the spec previously flagged as undesigned. `findExistingNodeId()` checks this before creating.
+- New field `field_source_storage_key` (string) — now shared across BOTH `point_of_interest` and `listing` bundles (one field storage, two field instances), storing the `PlaceIdentity` key a node came from — the node-level duplicate-detection mechanism the spec previously flagged as undesigned. `findExistingNodeId()` checks this before creating, and is PUBLIC (not just used internally) specifically so dry-run reporting can check existence without triggering a write — see "Production Field Deployment" section for why this changed.
 - **Every created node is UNPUBLISHED.** Publishing is an editorial decision, not an import one.
 - `field_poi_location` set via `CoordinateTransformer` (see below). `field_poi_address` populated only when `AddressVerifier` reports `STATUS_VERIFIED`; otherwise left empty, per the field ownership matrix's `SOURCE_ASSISTED_REVIEW` default.
 - `field_canadian_towns` is NOT set by this version — Geoapify's `properties.city` is free text; resolving it to a real taxonomy term is a separate, NOT YET BUILT piece, distinct from `TownBoundaryResolver` (which goes the opposite direction: town → search area, not place → town).
@@ -468,6 +474,19 @@ Two further rules from this revision:
 - **Do not treat an external identifier as stable or unique until it has been tested across at least two differing requests.** The Geoapify `place_id` was assumed stable and was not; the error surfaced only when the same place was fetched by two different queries.
 - **Keep directory names and namespace segments identical in case.** macOS hides mismatches that Linux production will not.
 
+## Production Field Deployment — NEW, BUILT (not yet applied to production)
+
+**Two different treatments for two different kinds of fields, deliberately:**
+
+- **Fields this module OWNS** (`field_source_storage_key`, `field_geoapify_categories`) — shipped as real `config/install/` YAML (field storage + field instance definitions, standard Drupal pattern), so they install automatically and identically on any fresh install of this module. Since `config/install` does NOT retroactively apply to an already-installed site, `geoapify_importer.install` also ships `hook_update_10001()`, which creates both fields programmatically (idempotent — checks existence before creating) for sites where the module is already installed, run via `drush updatedb`.
+- **Fields this module DEPENDS ON but does NOT own** (`field_poi_location`, `field_poi_address`, `field_poi_category` — pre-existing on `point_of_interest`, created independently before this module existed) — deliberately NOT bundled into `config/install`. Bundling a guessed-at definition risks either an install failure (config name collision with what already exists) or silently installing a narrower version that loses real settings on a site where the field is already correctly configured. Instead, `hook_requirements()` checks these exist and fails loudly and specifically (visible at `/admin/reports/status`) if any are missing, rather than letting the module appear to install successfully while actually broken.
+
+**`field_source_storage_key` is intentionally ONE field shared across TWO bundles** (`point_of_interest` and `listing`), not two separate fields — it's a node-level concept ("which geoapify_importer place produced this node"), not POI-specific, matching the spec's own architecture goal that a future Listing importer should reuse `TownImportRunner`'s output. Attaching the instance to `listing` now, ahead of any Listing-side mapper/creator existing, costs nothing and avoids a second migration later. **Nothing currently writes to it on the Listing side** — `PoiNodeCreator` only ever creates `point_of_interest` nodes; this is groundwork, not active functionality yet.
+
+**`field_geoapify_categories` was NOT extended to Listing's own category vocabulary** (`listing_category`) — that depends on a Listing-side mapper that doesn't exist yet, and would be speculative to build ahead of it.
+
+**Status: built, verified on devtop via `drush updatedb`, NOT YET applied to production.** This is real, necessary groundwork for eventual production deployment, but production itself has not been touched.
+
 ## Current Verified State
 
 ### Verified, this stretch (in addition to everything verified previously)
@@ -492,6 +511,8 @@ Two further rules from this revision:
 ### Not yet implemented / not yet resolved
 
 - **Node UPDATE logic** (applying the field ownership matrix per-field to an already-existing node — title never changes, location always re-syncs, category/address fill-if-empty) — now the single biggest open item in the POI pipeline; `PoiNodeCreator` is explicitly create-only
+- **Production field deployment is BUILT but NOT YET APPLIED** — `config/install` YAML + `hook_update_10001()` exist and are verified working on devtop, but production itself has not had this module's fields deployed. This is the real, concrete next step before production use.
+- Cron/queue wiring was never built despite being explicitly requested ("let it work away") — `geoapify:import` still requires manual invocation
 - `field_canadian_towns` resolution — Geoapify's free-text `properties.city` has no path to a real `canadian_towns` term yet; not built
 - Cron/queue wiring for unattended operation — `geoapify:import` still requires manual invocation; the spec's original plan for Drupal cron/Queue API integration is unbuilt
 - Whether Anzac/Gregoire are their own `canadian_towns` terms or expected to be covered under Fort McMurray — raised, not checked

@@ -1,0 +1,20 @@
+langcode: en
+status: true
+dependencies:
+  config:
+    - field.storage.node.field_source_storage_key
+    - node.type.listing
+  module:
+    - node
+id: node.listing.field_source_storage_key
+field_name: field_source_storage_key
+entity_type: node
+bundle: listing
+label: 'Source Storage Key'
+description: 'The geoapify_importer storage key this node was created from.'
+required: false
+translatable: false
+default_value: {  }
+default_value_callback: ''
+settings: {  }
+field_type: string

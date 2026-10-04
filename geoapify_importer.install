@@ -1,0 +1,92 @@
+<?php
+
+use Drupal\field\Entity\FieldConfig;
+use Drupal\field\Entity\FieldStorageConfig;
+
+function geoapify_importer_requirements($phase) {
+  $requirements = [];
+  if ($phase !== 'runtime' && $phase !== 'install') {
+    return $requirements;
+  }
+  $required_fields = [
+    'field_poi_location' => 'point_of_interest',
+    'field_poi_address' => 'point_of_interest',
+    'field_poi_category' => 'point_of_interest',
+  ];
+  $missing = [];
+  foreach ($required_fields as $field_name => $bundle) {
+    if (FieldConfig::loadByName('node', $bundle, $field_name) === NULL) {
+      $missing[] = "{$field_name} on node.{$bundle}";
+    }
+  }
+  if (!empty($missing)) {
+    $requirements['geoapify_importer_required_fields'] = [
+      'title' => t('Geoapify Importer: required fields'),
+      'value' => t('Missing: @list', ['@list' => implode(', ', $missing)]),
+      'severity' => REQUIREMENT_ERROR,
+    ];
+  }
+  else {
+    $requirements['geoapify_importer_required_fields'] = [
+      'title' => t('Geoapify Importer: required fields'),
+      'value' => t('All required pre-existing fields found.'),
+      'severity' => REQUIREMENT_OK,
+    ];
+  }
+  return $requirements;
+}
+
+function geoapify_importer_update_10001() {
+  if (FieldStorageConfig::loadByName('node', 'field_source_storage_key') === NULL) {
+    FieldStorageConfig::create([
+      'field_name' => 'field_source_storage_key',
+      'entity_type' => 'node',
+      'type' => 'string',
+      'settings' => ['max_length' => 255, 'is_ascii' => FALSE, 'case_sensitive' => FALSE],
+      'cardinality' => 1,
+      'translatable' => TRUE,
+    ])->save();
+  }
+  if (FieldConfig::loadByName('node', 'point_of_interest', 'field_source_storage_key') === NULL) {
+    FieldConfig::create([
+      'field_name' => 'field_source_storage_key',
+      'entity_type' => 'node',
+      'bundle' => 'point_of_interest',
+      'label' => 'Source Storage Key',
+      'required' => FALSE,
+      'translatable' => FALSE,
+    ])->save();
+  }
+  if (\Drupal::entityTypeManager()->getStorage('node_type')->load('listing') !== NULL
+    && FieldConfig::loadByName('node', 'listing', 'field_source_storage_key') === NULL) {
+    FieldConfig::create([
+      'field_name' => 'field_source_storage_key',
+      'entity_type' => 'node',
+      'bundle' => 'listing',
+      'label' => 'Source Storage Key',
+      'required' => FALSE,
+      'translatable' => FALSE,
+    ])->save();
+  }
+  if (FieldStorageConfig::loadByName('taxonomy_term', 'field_geoapify_categories') === NULL) {
+    FieldStorageConfig::create([
+      'field_name' => 'field_geoapify_categories',
+      'entity_type' => 'taxonomy_term',
+      'type' => 'string',
+      'settings' => ['max_length' => 255, 'is_ascii' => FALSE, 'case_sensitive' => FALSE],
+      'cardinality' => -1,
+      'translatable' => TRUE,
+    ])->save();
+  }
+  if (FieldConfig::loadByName('taxonomy_term', 'poi_category', 'field_geoapify_categories') === NULL) {
+    FieldConfig::create([
+      'field_name' => 'field_geoapify_categories',
+      'entity_type' => 'taxonomy_term',
+      'bundle' => 'poi_category',
+      'label' => 'Geoapify Categories',
+      'required' => FALSE,
+      'translatable' => FALSE,
+    ])->save();
+  }
+  return t('Fields created, if not already present.');
+}
