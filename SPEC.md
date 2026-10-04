@@ -2,7 +2,17 @@
 
 ## Revision Notes (latest revision)
 
-**Newest changes (this pass), most important first:**
+**Newest changes (this pass), most important first — this was a large stretch of work:**
+
+1. **The import pipeline is now complete end-to-end, not just ingestion.** `PoiCategoryMapper` (DIRECT taxonomy mapping via a new `field_geoapify_categories` field on the `poi_category` vocabulary) and `PoiNodeCreator` (create-only node creation, never update) are built and verified. `PoiImportProcessor` orchestrates mapping+creation per place, consuming `TownImportRunner`'s output. `geoapify:import` now creates real, unpublished POI nodes, not just raw files. **Current real scale: 139 POI nodes created, 1,115 raw places stored, across multiple towns (testing has gone beyond Taber to other cities).**
+2. **A real duplicate-record bug was found and fixed via the `building` tag issue, and a second real bug was found and fixed: `PoiNodeCreator` originally counted "no usable name" (a real, common case for unnamed OSM features) as a generic error — now counted separately (`no_name`) since it isn't a failure.**
+3. **An alternative data source (AnythingPOI, a 5GB GeoParquet dataset) was evaluated in depth and rejected in favor of staying on Geoapify** — see new "Alternative Data Source Evaluation" section. Real findings: ~12x more raw coverage for the same search area, but a real, unmitigated duplicate-record problem (same place appearing as separate, unconflated rows from OSM vs. Overture) and a README that didn't match its own data twice (ID prefix convention, confidence-score baseline). ODbL licensing was researched in depth and is NOT a blocker for either source (Produced Work doctrine covers the planned business model) — important finding, not just a caveat.
+4. **Geoapify's Place Details API is now integrated as an optional enrichment step**, addressing the sparse-contact-data gap found during the AnythingPOI comparison — see new "Rate Limiting and Enrichment" section. Looked up by OSM type/ID (no extra lookup needed). Off by default.
+5. **A global daily rate limit is now enforced inside `GeoapifyClient` itself**, across every endpoint it calls (Places search, both geocoding directions, Place Details) — not scoped to any single feature. This was a deliberate design correction: an initial version scoped the limit to Place Details only, which would have missed the real risk of ordinary Places/geocoding calls alone exhausting a day's credit allowance during an unattended, cron-driven run.
+6. **A real devtop environment problem was found and fixed:** PHP was resolving to 8.3.33 via Herd despite the global Herd setting showing 8.4 — this project's Herd site had its own separate isolation setting, only fixable via `herd use 8.4` for the CLI specifically (site-level `herd isolate` only affects web requests, not terminal commands).
+7. **A real database schema problem was found and fixed:** devtop's `field_poi_address` table was missing a column (`address_line3`) that the installed Address module's current schema expects — likely built by an older module version. Fixed via direct `ALTER TABLE`, since Drupal's own `field:delete`/`updatedb` tooling could not resolve it (both depend on querying the same broken table).
+
+**Previous pass's newest changes:**
 
 1. **Category classification decided and expanded.** `PoiCategoryClassifier` now has three outcomes: `ignored`, `needs_review`, `pending_mapping`. Business-model decisions confirmed: commercial categories default to `ignored` (reason `commercial`, destined for Listings); historic sites, government buildings, hospitals, police, fire stations, tourism info centres, and cemeteries are exceptions that stay POI-eligible; museums/zoos/aquariums/theme parks/galleries/theatres and a gray-area group (beach resorts, campgrounds, marinas, ski lifts, stadiums, golf courses, brewery/winery/distillery tours) always require manual `needs_review`, because the deciding factor (usually ownership) isn't in Geoapify's data.
 2. **Real bug found and fixed:** a blanket `building` ignore rule was silently mis-classifying real POI candidates (hospitals, churches, historic sites, government buildings) that carry a generic `building.*` tag alongside their specific category. Removed entirely; every genuine commercial case already matches independently.
@@ -272,7 +282,7 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 
 **Still open:** whether/how a POI can later be upgraded to a paid Listing (Option 1 vs. Option 2 above) remains undecided and unbuilt; Listing's own field-ownership matrix is undesigned; `field_is_paid` or equivalent does not exist yet.
 
-## Classification Engine — CATEGORY DECISIONS RESOLVED; MAPPER NOT YET BUILT
+## Classification Engine — CATEGORY DECISIONS RESOLVED; MAPPER BUILT AND VERIFIED
 
 ### Geoapify's full category list — authoritative, live-pulled
 
@@ -284,7 +294,7 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 - **`classify(array $categories): array`** now returns one of three statuses, not two:
   - **`ignored`** — never becomes a POI. Carries a `reason`: `not_a_place` (e.g. individual artwork), `commercial` (belongs in Listings), `infrastructure` (roads, utilities, parking — not a place or business), or `administrative_area` (regions/boundaries, not point attractions).
   - **`needs_review`** — NEW. A known, real category that can never be auto-classified, because the deciding factor (usually public vs. private ownership) is not in Geoapify's data. A future DIRECT-mapping mapper must not bypass this list even once taxonomy tagging exists for these categories.
-  - **`pending_mapping`** — confirmed POI-eligible, no taxonomy term assigned yet (the not-yet-built mapper's job).
+  - **`pending_mapping`** — confirmed POI-eligible; `PoiCategoryMapper` attempts to resolve a real taxonomy term for these (see below).
 - **Business-model policy, confirmed with the project owner and encoded in the classifier:**
   - Default: a commercial category is `ignored` (reason `commercial`), destined for the Listing content type, not POI.
   - Explicit exceptions — POI-eligible regardless of commercial activity, achieved simply by never appearing in any ignore list: historic/heritage sites, government buildings (`office.government.*`), hospitals (`healthcare.hospital`), police (`service.police`), fire stations (`service.fire_station`), tourism info centres (`tourism.information.*`), cemeteries (`memorial.cemetery`, `.graveyard`). `office.government.*` and `service.police`/`.fire_station` needed an explicit `IGNORE_EXCEPTIONS` carve-out, checked first, because they sit under otherwise-ignored parents (`office`, `service`).
@@ -297,6 +307,81 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
 ### Classification wired into `geoapify:fetch`
 
 The fetch command now runs `PoiCategoryClassifier` on every fetched place and reports it in a new Classification column. **Classification never gates whether a place is written or skipped** — only `ChangeDetector` does that. Every fetched place is stored regardless of what it classifies as, per the decision to store first and sort on top of stored data.
+
+### `PoiCategoryMapper` — DIRECT mapping, built and verified
+
+- Class: `Drupal\geoapify_importer\Service\Poi\PoiCategoryMapper`. Service: `geoapify_importer.poi_category_mapper`.
+- Scope: DIRECT mapping only (exact tag match), not the original spec's CONDITIONAL concept — no real conditional case has shown up in data.
+- New field `field_geoapify_categories` (multi-value string) added to the `poi_category` taxonomy vocabulary (confirmed real machine name: `poi_category`). Editors tag a term (e.g. "Historical") with the Geoapify category strings it should catch (e.g. `entertainment.museum`).
+- `map(array $categories): ?array` tries each of a place's categories, most specific first, against live-tagged terms. Returns `NULL` (→ `UNMAPPED`, routed to review, never a silent guess) if nothing matches.
+- **Queries the live taxonomy on whichever environment it runs on** — same reasoning as the rest of the dynamic-mapping design: the field is config (identical everywhere), its values are content (expected to differ between devtop and production).
+- Logs a warning (not an error) if more than one term claims the same category — a real editorial tagging conflict, not a crash.
+- **Verified:** a real tagged term ("Historical" → `entertainment.museum`) correctly matched a real stored record (Heritage Village); an untagged category (`waterway.channels`) correctly returned `UNMAPPED`.
+
+### `PoiNodeCreator` — node creation, CREATE ONLY, built and verified
+
+- Class: `Drupal\geoapify_importer\Service\Poi\PoiNodeCreator`. Service: `geoapify_importer.poi_node_creator`.
+- **Scope, deliberately narrow: CREATE ONLY, never updates an existing node.** Updating requires applying the field ownership matrix per-field (title never changes after creation; location always re-syncs; category/address need review-aware fill-if-empty logic) — a distinct, NOT YET BUILT piece.
+- Only called for places already resolved to a real term by `PoiCategoryMapper` — `needs_review` and `UNMAPPED` places get no node yet.
+- New field `field_source_storage_key` (string) on `point_of_interest`, storing the `PlaceIdentity` key a node came from — the node-level duplicate-detection mechanism the spec previously flagged as undesigned. `findExistingNodeId()` checks this before creating.
+- **Every created node is UNPUBLISHED.** Publishing is an editorial decision, not an import one.
+- `field_poi_location` set via `CoordinateTransformer` (see below). `field_poi_address` populated only when `AddressVerifier` reports `STATUS_VERIFIED`; otherwise left empty, per the field ownership matrix's `SOURCE_ASSISTED_REVIEW` default.
+- `field_canadian_towns` is NOT set by this version — Geoapify's `properties.city` is free text; resolving it to a real taxonomy term is a separate, NOT YET BUILT piece, distinct from `TownBoundaryResolver` (which goes the opposite direction: town → search area, not place → town).
+- **Real bug found and fixed:** a place with no `name` property (a real, common case for some OSM features — e.g. an unnamed school field or park segment) was being counted as a generic `error`. This is expected, not a failure. Now split into its own `no_name` outcome, both in `PoiNodeCreator`'s own result and in `PoiImportProcessor`'s aggregate counts.
+- **Verified end-to-end:** Heritage Village created correctly (title, category via the mapper, transformed location, correctly-empty address). Re-running creation for the same place correctly returned `skipped_existing` with the same node ID — no duplicate. At real scale (Taber's 46 places): 10 correctly matched already-existing nodes, 1 correctly held for review, 28 correctly unmapped, 7 correctly separated as `no_name`, 0 genuine errors.
+
+### `CoordinateTransformer` — Geoapify coordinates to Geolocation field value, built and verified
+
+- Class: `Drupal\geoapify_importer\Service\CoordinateTransformer`. Service: `geoapify_importer.coordinate_transformer`. Shared infrastructure — POI's `field_poi_location` and Listing's `field_street_location` both use the Geolocation module.
+- Converts Geoapify's GeoJSON `[longitude, latitude]` into the Geolocation module's `['lat' => ..., 'lng' => ...]` shape. Validates range and throws on a swapped-order input (a plausible-looking but wrong location otherwise).
+- **Verified via an actual write**, not just inference from the field structure already confirmed on `canadian_towns` terms: a real test POI node's `field_poi_location` correctly computed `lat_sin`/`lat_cos`/`lng_rad` automatically on save, matching the shape seen on town terms.
+- **Environment note:** `field_poi_location`, `field_poi_address`, `field_poi_category`, and `field_source_storage_key` all needed to be created on devtop via `drush field:create` as dev-only stand-ins for testing — none are synced copies of production's real field configuration. Still an open item.
+
+### `PoiImportProcessor` — orchestrates mapping + creation, wired into `geoapify:import`
+
+- Class: `Drupal\geoapify_importer\Service\Poi\PoiImportProcessor`. Service: `geoapify_importer.poi_import_processor`.
+- Consumes `TownImportRunner`'s `processed` list (every place it saw, each with its classification result — collected regardless of file-change status, since a place with an unchanged file can still lack a node). Runs the mapper + creator for `pending_mapping` places; does nothing for `ignored`/`needs_review`.
+- `geoapify:import` reports POI-stage results (created, existing, needs_review, unmapped, ignored, no_name, errors) alongside the existing ingestion stats, per-town and in a final summary table.
+- A future Listing importer would reuse `TownImportRunner`'s same output with its own processor — this is why `TownImportRunner` itself has no taxonomy-mapping or node-creation knowledge.
+
+## Alternative Data Source Evaluation — AnythingPOI (evaluated, REJECTED; staying on Geoapify)
+
+A 5GB Canada-wide POI dataset (`anythingpoi_canada_v0.1`, Zenodo, DOI 10.5281/zenodo.20009008) was proposed as a replacement data source and evaluated in real depth before any code was changed.
+
+**What it is:** 5,565,256 Canadian POIs, fusing OpenStreetMap and Overture Maps Foundation data via H3 spatial conflation + Jaro-Winkler name matching + confidence scoring. GeoParquet format (18 files, one per Tier-1 category), 18 Tier-1 / 196 Tier-2 taxonomy (completely different from Geoapify's 833-category system — would have required rebuilding `PoiCategoryClassifier`'s table from scratch). Published May 2026, single academic author, "Work in Progress" status, 36 downloads at time of evaluation.
+
+**Format was NOT a real blocker, contrary to initial assessment:** a real, actively-maintained Composer package (`flow-php/parquet`, PHP 8.3–8.5 compatible) can read GeoParquet directly — no external Python/DuckDB conversion step needed, reversing an earlier incorrect claim that PHP had no way to read it.
+
+**Licensing was researched in depth and is NOT a blocker, for either data source:** ODbL 1.0 (the same license both this dataset and Geoapify's underlying OSM data use) distinguishes a "Derivative Database" (redistributing the data itself — triggers share-alike) from a "Produced Work" (using the data to build a finished product like a website — does NOT, and can be licensed/sold however the builder wants). A Towns Canada website showing POI/Listing pages, even commercially, is a Produced Work. The one real, concrete requirement is visible attribution (OpenStreetMap + Overture, where applicable), and the one thing to actually avoid is ever letting the public bulk-export the raw underlying data itself. **Note: this dataset's own README overstates ODbL's restrictions** ("the derived work must also be released under ODbL") beyond what the actual license text says — confirmed by cross-referencing the OSM Foundation's own ODbL documentation directly, not by trusting either source's paraphrase.
+
+**Real comparison performed:** both sources queried for the same ~15km radius around Taber, AB. AnythingPOI returned 582 real POIs vs. Geoapify's 46 (via the curated 39-category search) — genuinely richer raw coverage, with real phone/website/address data Geoapify's search alone didn't surface.
+
+**Real problems found that led to rejection:**
+- **Unmitigated duplicate records.** The same real place (e.g. Taber's irrigation museum, a Super 8 Motel) appeared as multiple separate, unconflated rows from different sources — the dataset's own stats confirm only 1.4% of records nationally are cross-source-matched. `PlaceIdentity`'s existing OSM-type+ID dedup would not catch this, since duplicates often have different underlying source IDs. Would have required building genuinely new fuzzy name+address+distance dedup logic before safe to import from.
+- **Documentation didn't match the actual data, twice:** the README's stated `id` prefix convention (`at_` for Overture-sourced, `osm_` for OSM-only) didn't match sample data (OSM-only records still carried `at_` prefixes); the documented `confidence_score` baseline values (0.01 OSM-only / 0.50 Overture-only) didn't match real sampled scores (~0.71–0.75 across the board).
+- A real tagging error was spotted directly in sampled data ("Hidden Spring Pet Resort" tagged `Community | Animal Shelter`).
+
+**Decision:** stay on Geoapify. Addressed the actual underlying gap (sparse contact data) via Geoapify's own complementary Place Details API instead — see next section — rather than taking on a new, unproven data source's real duplicate-record problem.
+
+## Rate Limiting and Enrichment — NEW, BUILT AND VERIFIED
+
+### `GeoapifyRateLimiter` — global daily cap, enforced inside `GeoapifyClient`
+
+- Class: `Drupal\geoapify_importer\Service\GeoapifyRateLimiter`. Service: `geoapify_importer.rate_limiter`.
+- **Enforced inside `GeoapifyClient` itself**, once per outgoing request, across ALL four of its methods (`request()`/Places search, `reverseGeocode()`, `forwardGeocode()`, `placeDetails()`) — not scoped to any single feature. This was a deliberate design correction after an initial version scoped the limit to Place Details only, which would have missed the real risk: an unattended, cron-driven import could exhaust a day's actual Geoapify credit allowance through ordinary Places/geocoding calls alone, with no cap ever noticing.
+- Tracked via a date-keyed Drupal State entry (`geoapify_importer.requests_YYYY-MM-DD`), resetting automatically at UTC midnight — no cleanup job needed.
+- **Counts requests, not credits** (stated simplification): most Geoapify endpoints cost 1 credit per request, including Place Details' default `details` feature, so the two numbers are usually the same. Would under-count real cost if a future feature requests Place Details' radius/isoline place-count features, which can cost several credits per call. Not a concern today since only the default `details` feature is used.
+- Config: `geoapify_rate_limit_enabled` (default TRUE), `geoapify_daily_request_limit` (default 2500 — chosen with headroom under the free plan's 3,000/day).
+- **Verified directly and conclusively:** a plain Places search call (not Place Details) was correctly blocked once an artificially-low limit (2) was reached, with the counter incrementing correctly (1, then 2, then blocked) — proving the limit is genuinely global, not feature-scoped.
+
+### `GeoapifyClient::placeDetails()` and `PlaceDetails` — enrichment, built and verified
+
+- New method on `GeoapifyClient`, endpoint `https://api.geoapify.com/v2/place-details`. Looks up by `osm_type`+`osm_id` directly — the same data `PlaceIdentity` already derives for every stored place, so no separate Geoapify place_id lookup is needed.
+- `PlaceDetails` (class `Drupal\geoapify_importer\Service\PlaceDetails`, service `geoapify_importer.place_details`) wraps this with just a feature on/off toggle (`place_details_enabled`, default FALSE) — actual throttling is the global rate limiter's job, not re-implemented here.
+- Returns `NULL`, never throws, for every "can't enrich this one" case (disabled, rate-limited, no OSM reference, request failure) — enrichment is additive and optional by design; its absence never blocks a place from being created.
+- **What it returns, confirmed from Geoapify's own documentation:** contact info (phone/email/fax), `opening_hours`, `wheelchair` and other facility booleans, ownership signals (`operator`, `operator_details.type`, `owner`, `owner_details.type`), category-specific detail (accommodation stars, historic period/civilization, artwork artist), Wikidata/Wikipedia references. Cost: 1 credit per call for the default `details` feature.
+- **Verified against real production-scale data** (139 real POI nodes, spanning multiple towns): confirmed working correctly — real values returned for some places (e.g. a park's `operator: City of North Bay`, `wikidata: Q111311537` on another), `NULL`/empty for others. **Confirmed this reflects real OpenStreetMap tagging sparsity, not a broken lookup** — parks are typically thinly tagged (no reason for a volunteer to add phone/hours to something with neither), while businesses are typically richly tagged. This was directly verified, not assumed: the same run that returned mostly-empty results for several parks also returned real operator/wikidata values for others in the identical call pattern.
+- **Noted but not yet built:** `operator`/`owner` fields are a real, if imperfect, signal that could help resolve the `needs_review` ownership-ambiguity cases (museums, zoos, the gray-area group) automatically in some cases, rather than always requiring manual review. Flagged as a future enhancement, not built.
 
 ## Change Detection — BUILT AND VERIFIED
 
@@ -385,38 +470,40 @@ Two further rules from this revision:
 
 ## Current Verified State
 
-### Verified this session (in addition to everything verified previously)
+### Verified, this stretch (in addition to everything verified previously)
 
+- **Full import pipeline complete end-to-end, at real scale:** `PoiCategoryMapper` (DIRECT mapping, live-tagged taxonomy), `PoiNodeCreator` (create-only, unpublished nodes), `CoordinateTransformer` (verified via actual write), `PoiImportProcessor` (orchestration) — all built, individually verified, and wired into `geoapify:import`. Real current scale: 139 POI nodes created, 1,115 raw places stored, across multiple towns.
+- A real node-creation bug found and fixed: "no usable name" was miscounted as a generic error — now split into its own `no_name` outcome.
+- `field_geoapify_categories`, `field_source_storage_key` added (dev-only stand-ins on devtop) and confirmed working for real mapping/dedup.
+- **AnythingPOI (external 5GB dataset) evaluated in full and rejected** in favor of staying on Geoapify — real duplicate-record problem found, README-vs-data mismatches found twice, ODbL licensing researched in depth and confirmed NOT a blocker for either source.
+- **Global `GeoapifyRateLimiter` built and verified**, enforced inside `GeoapifyClient` across all four of its methods — confirmed via a real test that a plain Places search call (not just Place Details) is correctly blocked once the daily cap is reached.
+- **`GeoapifyClient::placeDetails()` and `PlaceDetails` enrichment built and verified** against real production-scale data (139 nodes) — confirmed the sparse-vs-rich data pattern reflects real OSM tagging behavior, not a broken lookup.
 - Reverse-geocode fallback corrected to use real, confirmed signal (housenumber+street), replacing an invalid design based on fields the API doesn't return
-- Settings form/config fully consistent across local site, stored config, and GitHub (a real discrepancy between these three was found and fixed)
-- `geoapify:fetch` Drush command built, verified working end-to-end at `limit=20` against real data
 - `PoiCategoryClassifier` expanded to three outcomes (ignored/needs_review/pending_mapping) with all business-model category decisions coded and verified against real data; a real `building`-tag misclassification bug found and fixed
-- Classification wired into `geoapify:fetch` as a reported column (never a write gate)
-- `TownBoundaryResolver` and `GeoapifyClient::forwardGeocode()` built and verified: real boundary-vs-circle discrepancy confirmed on Calgary (5 of ~198 supermarkets disagreed); confidence threshold verified as necessary via a real case (Tadmore, BC)
+- `TownBoundaryResolver` built and verified, including a real name-collision mitigation (plausibility distance check against a town's own known coordinates) — verified via a real deliberate-mismatch test (Taber's identity + Halifax's coordinates, correctly rejected at 3,646.6 km)
+- `TownImportRunner` + `geoapify:import` built and verified at real scale (Taber's full 46 places, then multiple additional towns): per-town boundary/circle search, category-by-category fetch (avoiding the unexplained multi-category anomaly), a real `natural` category flooding bug found and fixed (narrowed to `natural.mountain`/`natural.forest`, matching the original spec's own mapping table)
 - `canadian_towns` taxonomy structure clarified: province-parent terms, `field_geolocation` structure, `field_type` designations (Locality/Hamlet/Village/Town/City)
-- Geoapify's full 833-category list obtained live and authoritatively
-- Production's real field structures for both `point_of_interest` and `listing` confirmed via direct, read-only SSH/Drush inspection
-- Production/local version parity confirmed (Drupal 11.4.7, PHP 8.4.26, Drush 13.8.0.0 on both)
-- Local vs. production taxonomy divergence confirmed as real and structural, directly shaping the classification engine's design toward dynamic taxonomy-field-driven mapping over static config
-- Geoapify `place_id` shown to be unstable across requests; `PlaceIdentity` (OSM type and ID) built and verified: the same places, fetched by queries of different category and radius, resolved to the same keys with no duplicates
-- `ChangeDetector` built and verified (new / unchanged / changed; 50 m coordinate tolerance; an 11 m shift reads unchanged, a 222 m shift reads changed)
-- `geoapify:fetch` skips unchanged places and reports status per place
-- Classifier directory case fixed (`POI` to `Poi`)
+- Production's real field structures for `point_of_interest`, `listing`, and `canadian_towns` confirmed via direct, read-only SSH/Drush inspection
+- Local vs. production taxonomy divergence confirmed as real and structural, directly shaping the classification/mapping design toward dynamic taxonomy-field-driven lookups over static config
+- Geoapify `place_id` shown to be unstable across requests; `PlaceIdentity` (OSM type and ID) built and verified
+- `ChangeDetector` built and verified (new/unchanged/changed; 50 m coordinate tolerance, verified necessary via a real false-positive)
+- Two real devtop environment bugs found and fixed: PHP CLI resolving to 8.3.33 despite Herd's global 8.4 setting (fixed via `herd use 8.4`); `field_poi_address`'s database table missing a column vs. the installed Address module's schema (fixed via direct `ALTER TABLE`)
 
 ### Not yet implemented / not yet resolved
 
-- **Dynamic taxonomy-field-driven mapper** (`field_geoapify_categories` on POI Category terms; the actual `PoiCategoryMapper` service performing DIRECT/CONDITIONAL lookups) — this is now the single biggest open item; category-level policy decisions are resolved, but nothing yet assigns an actual taxonomy term
-- Per-town import loop using `TownBoundaryResolver` + circle fallback — resolver exists in isolation, not wired into any command
+- **Node UPDATE logic** (applying the field ownership matrix per-field to an already-existing node — title never changes, location always re-syncs, category/address fill-if-empty) — now the single biggest open item in the POI pipeline; `PoiNodeCreator` is explicitly create-only
+- `field_canadian_towns` resolution — Geoapify's free-text `properties.city` has no path to a real `canadian_towns` term yet; not built
+- Cron/queue wiring for unattended operation — `geoapify:import` still requires manual invocation; the spec's original plan for Drupal cron/Queue API integration is unbuilt
 - Whether Anzac/Gregoire are their own `canadian_towns` terms or expected to be covered under Fort McMurray — raised, not checked
 - Whether `field_type` (Locality/Hamlet/Village/Town/City) should skip boundary resolution for `Locality` terms — plausible, not decided or built
-- Whether/how a POI can be "upgraded" to a Listing (Option 1 vs. Option 2 from the discussion above) — not finalized, not built
-- Listing's own field-ownership matrix
+- Whether/how a POI can be "upgraded" to a Listing (Option 1 vs. Option 2 from the business-model discussion) — not finalized, not built
+- Listing's own field-ownership matrix; Listing-side mapper/creator (would reuse `TownImportRunner`'s output, per its own design)
 - `field_is_paid` (or equivalent) flag/mechanism gating Listing's paid components
 - Production private-filesystem path naming confirmation (`/home/townscanada/backup`)
+- **Production deployment of ALL dev-only fields** (`field_poi_location`, `field_poi_address`, `field_poi_category`, `field_source_storage_key`, `field_geoapify_categories`) — none are synced copies of production's real field configuration; this is a real, necessary step before any production deployment
 - Confirmation of whether production's Canadian Towns taxonomy content actually differs from local's (divergence was stated by project owner; not yet directly diffed term-by-term)
-- Node-level duplicate detection: how a node records its storage key (probably a new field on POI and Listing) — not designed
-- Geolocation transform: `field_poi_location` and Listing's `field_street_location` use the Geolocation module; converting Geoapify's `[lon, lat]` into its field structure is unbuilt, and the field's real properties have not yet been checked on this install
-- Multi-category Places queries returning a subset (open item under "Places API")
+- Multi-category Places queries returning a subset (open item under "Places API") — worked around by querying categories one at a time, never explained
 - Fallback duplicate detection (coordinates; normalized name plus context) for OSM objects that are recreated with a new ID
-- Coordinate tolerance (50 m) tuning against real data, especially for large outlines
-- Everything previously listed as not-yet-implemented in prior revisions, except change detection (now built): POI/Listing creation services, queue workers, cron, remaining Drush commands (`geoapify:import`, `geoapify:check-updates`, `geoapify:status`), import status persistence, production deployment of this module
+- Coordinate tolerance (50 m) tuning against real data at larger scale, especially for large outlines
+- `operator`/`owner` enrichment fields as a possible automated resolver for `needs_review` ownership ambiguity — noted as promising, not built
+- Remaining Drush commands (`geoapify:check-updates`, `geoapify:status`), import status persistence, production deployment of this module
