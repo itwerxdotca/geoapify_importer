@@ -8,3 +8,12 @@ geoapify_importer.settings:
     reverse_geocode_enabled:
       type: boolean
       label: 'Enable reverse-geocode address verification fallback'
+    geoapify_rate_limit_enabled:
+      type: boolean
+      label: 'Enable daily Geoapify request limit'
+    geoapify_daily_request_limit:
+      type: integer
+      label: 'Maximum Geoapify API requests per day, across all endpoints'
+    place_details_enabled:
+      type: boolean
+      label: 'Enable Place Details enrichment'

@@ -288,6 +288,7 @@ class TownImportRunner {
             'key' => $key,
             'feature' => $feature,
             'classification' => $classification,
+            'change_status' => $status,
           ];
 
           $summary[$status]++;

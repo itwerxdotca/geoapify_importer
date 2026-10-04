@@ -1,7 +1,7 @@
 services:
   geoapify_importer.client:
     class: Drupal\geoapify_importer\Service\GeoapifyClient
-    arguments: ['@http_client', '@logger.channel.geoapify_importer', '@state']
+    arguments: ['@http_client', '@logger.channel.geoapify_importer', '@state', '@geoapify_importer.rate_limiter']
 
   geoapify_importer.source_writer:
     class: Drupal\geoapify_importer\Service\SourceFileWriter
@@ -42,6 +42,14 @@ services:
   geoapify_importer.poi_import_processor:
     class: Drupal\geoapify_importer\Service\Poi\PoiImportProcessor
     arguments: ['@geoapify_importer.poi_category_mapper', '@geoapify_importer.poi_node_creator', '@logger.channel.geoapify_importer']
+
+  geoapify_importer.rate_limiter:
+    class: Drupal\geoapify_importer\Service\GeoapifyRateLimiter
+    arguments: ['@state', '@config.factory']
+
+  geoapify_importer.place_details:
+    class: Drupal\geoapify_importer\Service\PlaceDetails
+    arguments: ['@geoapify_importer.client', '@config.factory', '@logger.channel.geoapify_importer']
 
   logger.channel.geoapify_importer:
     parent: logger.channel_base
