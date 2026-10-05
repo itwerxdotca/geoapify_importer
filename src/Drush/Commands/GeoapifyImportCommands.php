@@ -16,7 +16,8 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
  * PoiImportProcessor class docblocks): TownImportRunner handles fetch,
  * identity, change detection, classification, and storage — shared
  * infrastructure, no POI-specific knowledge. PoiImportProcessor consumes
- * its output and runs POI-specific mapping + node creation. A future
+ * its output and runs POI-specific mapping, node creation, and updating of
+ * nodes that already exist. A future
  * Listing importer would reuse TownImportRunner's output with its own
  * processor instead.
  */
@@ -48,11 +49,13 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
    * (never combined — see TownImportRunner); and stores new/changed
    * places via SourceFileWriter. Unchanged places are skipped for
    * storage, but every place (changed or not) is still classified and
-   * passed to PoiImportProcessor, which maps and creates a POI node for
-   * anything resolvable (see PoiImportProcessor, PoiCategoryMapper,
-   * PoiNodeCreator). Created nodes are always unpublished. Places needing
-   * manual review or with no tagged taxonomy term do NOT get a node yet
-   * — they remain as raw files, reprocessable once resolved.
+   * passed to PoiImportProcessor, which maps each one and then either
+   * creates a POI node (always unpublished) or, if one already exists,
+   * updates it per the field ownership matrix (see PoiNodeUpdater: location
+   * re-synced when moved, empty category/address filled in, title and
+   * editorial fields never touched). Places needing manual review or with
+   * no tagged taxonomy term do NOT get a node — they remain as raw files,
+   * reprocessable once resolved.
    *
    * @option town
    *   Only import a town whose name contains this text (case-insensitive).
@@ -61,8 +64,8 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
    *   Stop after this many towns. For testing/partial runs.
    * @option dry-run
    *   Run the full pipeline (fetch, identity, change detection,
-   *   classification) but do not write anything to the private
-   *   filesystem. Safe to use for a full trial run.
+   *   classification, mapping) but write nothing: no files, no new nodes,
+   *   no node updates. Reports exactly what a real run would do.
    *
    * @usage drush geoapify:import --town="Fort McMurray"
    *   Import a single town by name, for testing.
@@ -75,7 +78,7 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
   #[CLI\Command(name: 'geoapify:import', aliases: ['geo-import'])]
   #[CLI\Option(name: 'town', description: 'Only import a town whose name contains this text.')]
   #[CLI\Option(name: 'towns-limit', description: 'Stop after this many towns.')]
-  #[CLI\Option(name: 'dry-run', description: 'Run the pipeline without writing any files.')]
+  #[CLI\Option(name: 'dry-run', description: 'Run the pipeline but write nothing (no files, no nodes).')]
   #[CLI\Usage(name: 'drush geoapify:import --town="Fort McMurray"', description: 'Import a single town by name, for testing.')]
   #[CLI\Usage(name: 'drush geoapify:import --towns-limit=5 --dry-run', description: 'Trial-run the first 5 towns without writing anything.')]
   public function import(
@@ -90,7 +93,7 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
     $dry_run = (bool) $options['dry-run'];
 
     if ($dry_run) {
-      $this->io()->note('Dry run: no files will be written.');
+      $this->io()->note('Dry run: nothing will be written (no files, no nodes, no node updates).');
     }
 
     $towns = $this->runner->loadImportableTowns();
@@ -121,7 +124,8 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
       'needs_review' => 0,
       'unmapped' => 0,
       'nodes_created' => 0,
-      'nodes_skipped_existing' => 0,
+      'nodes_updated' => 0,
+      'nodes_unchanged' => 0,
       'no_name' => 0,
       'poi_errors' => 0,
     ];
@@ -155,12 +159,13 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
       $totals['needs_review'] += $poi_counts['needs_review'];
       $totals['unmapped'] += $poi_counts['unmapped'];
       $totals['nodes_created'] += $poi_counts['nodes_created'];
-      $totals['nodes_skipped_existing'] += $poi_counts['nodes_skipped_existing'];
+      $totals['nodes_updated'] += $poi_counts['nodes_updated'];
+      $totals['nodes_unchanged'] += $poi_counts['nodes_unchanged'];
       $totals['no_name'] += $poi_counts['no_name'];
       $totals['poi_errors'] += $poi_counts['errors'];
 
       $this->io()->text(sprintf(
-        '%s [%s]: %d new, %d changed, %d unchanged, %d errors (%d/%d categories ok)%s | POI: %d created, %d existing, %d needs_review, %d unmapped, %d ignored, %d no-name',
+        '%s [%s]: %d new, %d changed, %d unchanged, %d errors (%d/%d categories ok)%s | POI: %d created, %d updated, %d in sync, %d needs_review, %d unmapped, %d ignored, %d no-name',
         $summary['town'],
         $summary['search_method'],
         $summary['new'],
@@ -171,12 +176,24 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
         $summary['categories_queried'] + $summary['categories_failed'],
         $summary['possibly_truncated'] ? ' — possibly truncated: ' . implode(', ', $summary['possibly_truncated']) : '',
         $poi_counts['nodes_created'],
-        $poi_counts['nodes_skipped_existing'],
+        $poi_counts['nodes_updated'],
+        $poi_counts['nodes_unchanged'],
         $poi_counts['needs_review'],
         $poi_counts['unmapped'],
         $poi_counts['ignored'],
         $poi_counts['no_name']
       ));
+
+      // One line per node touched, so a run is auditable: what changed.
+      foreach ($poi_counts['updates'] as $update) {
+        $this->io()->text(sprintf(
+          '    %s node %d "%s": %s',
+          $dry_run ? 'would update' : 'updated',
+          $update['nid'],
+          $update['title'],
+          implode(', ', $update['fields'])
+        ));
+      }
     }
 
     $this->io()->table(
@@ -193,7 +210,8 @@ final class GeoapifyImportCommands extends DrushCommands implements ContainerInj
         ['Failed category requests', $totals['categories_failed']],
         ['Category results possibly truncated', $totals['possibly_truncated']],
         ['POI nodes created', $totals['nodes_created']],
-        ['POI nodes already existing (skipped)', $totals['nodes_skipped_existing']],
+        ['POI nodes updated', $totals['nodes_updated']],
+        ['POI nodes already in sync', $totals['nodes_unchanged']],
         ['Places needing manual review', $totals['needs_review']],
         ['Places unmapped (no tagged term)', $totals['unmapped']],
         ['Places ignored (not POI-eligible)', $totals['ignored']],
