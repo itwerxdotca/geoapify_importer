@@ -4,6 +4,15 @@
 
 **Newest changes (this pass):**
 
+1. **Node update logic built and verified** (`PoiNodeUpdater`). Existing POI nodes are now brought up to date per the field ownership matrix instead of being skipped. See "Node Updates".
+2. **Town connection decided and partly built.** The node's town is the town the import was searching (boundary first, circle fallback also assigns), decided once in the shared `TownImportRunner` and applied by the creator and updater. See "Town and Address Connection".
+3. **Repository and data scan.** Real counts from devtop showed that name-matching places to town terms resolves only 11% of node-eligible places, and that none of them has a street address. Both are recorded with the numbers.
+4. **Built, then dropped:** `PlaceAddress` and `GeoPoint`. Recorded so they are not rebuilt.
+5. **OPEN BLOCKER:** devtop's `point_of_interest` type has no `field_canadian_towns`. A field comparison run on both environments shows the field's storage on devtop is an entity reference like production's (it is already on devtop's Listing), so it only needs attaching to POI. The town fill cannot be verified until then.
+6. **Stale spec statements corrected** (module structure, node-level duplicate detection, node creation scope, the town resolver signature, the circle fallback). A new "Working Agreements" section records how work on this project is to be done.
+
+**Previous pass:**
+
 1. **Production field deployment groundwork built.** Five config/install YAML files (field storage + field instance definitions) added for the two fields this module genuinely owns: `field_source_storage_key` (now attached to BOTH `point_of_interest` AND `listing` — a deliberate choice, since it's a node-level dedup concept, not POI-specific, and the project's own architecture goal is for a future Listing importer to reuse the same mechanism) and `field_geoapify_categories` (on the `poi_category` taxonomy). A `geoapify_importer.install` file was added with `hook_requirements()` (checks that `field_poi_location`/`field_poi_address`/`field_poi_category` — fields this module does NOT own and must not try to create — actually exist, failing loudly if not) and `hook_update_10001()` (creates the two owned fields programmatically on an already-installed site, since `config/install` only applies automatically on a brand-new install).
 2. **A real dry-run accuracy bug found and fixed.** `PoiImportProcessor`'s dry-run path assumed every successfully-mapped place would be newly created, without ever checking whether a node already existed — because the existence check previously lived only inside `PoiNodeCreator::create()`, which dry-run skipped entirely. Found via a real test: re-running `--dry-run` against Taber (already fully imported) reported "17 created" for places that already had real nodes. Fixed by making `PoiNodeCreator::findExistingNodeId()` public and having dry-run call it directly; also fixed dry-run to check for the "no usable name" case the same way a real run does, rather than only being accurate for the `nodes_created`/`nodes_skipped_existing` split.
 3. **Session note:** this project is being handed off to a new account/session at this point. Everything below reflects the module's real, current state as verified this session — treat it as a reliable starting point for continuation, not as requiring re-verification from scratch.
@@ -93,31 +102,49 @@ The importer must be designed as a maintainable ingestion pipeline that can late
 - Machine name: `geoapify_importer`
 - Name: `Geoapify Importer`
 
-### Current module structure (as committed)
+### Current module structure (as committed, plus the uncommitted town-passing changes)
 
 ```
 geoapify_importer/
 ├── config/
+│   ├── install/
+│   │   ├── field.field.node.listing.field_source_storage_key.yml
+│   │   ├── field.field.node.point_of_interest.field_source_storage_key.yml
+│   │   ├── field.field.taxonomy_term.poi_category.field_geoapify_categories.yml
+│   │   ├── field.storage.node.field_source_storage_key.yml
+│   │   └── field.storage.taxonomy_term.field_geoapify_categories.yml
 │   └── schema/
 │       └── geoapify_importer.schema.yml
 ├── src/
-│   ├── Drush/
-│   │   └── Commands/
-│   │       └── GeoapifyImporterCommands.php
+│   ├── Drush/Commands/
+│   │   ├── GeoapifyImportCommands.php
+│   │   └── GeoapifyImporterCommands.php
 │   ├── Form/
 │   │   └── GeoapifyImporterSettingsForm.php
 │   └── Service/
 │       ├── AddressVerifier.php
 │       ├── ChangeDetector.php
+│       ├── CoordinateTransformer.php
 │       ├── GeoapifyClient.php
+│       ├── GeoapifyRateLimiter.php
+│       ├── PlaceDetails.php
 │       ├── PlaceIdentity.php
 │       ├── SourceFileWriter.php
+│       ├── TownBoundaryResolver.php
+│       ├── TownImportRunner.php
 │       └── Poi/
-│           └── PoiCategoryClassifier.php
+│           ├── PoiCategoryClassifier.php
+│           ├── PoiCategoryMapper.php
+│           ├── PoiImportProcessor.php
+│           ├── PoiNodeCreator.php
+│           └── PoiNodeUpdater.php
 ├── geoapify_importer.info.yml
-├── geoapify_importer.services.yml
+├── geoapify_importer.install
+├── geoapify_importer.links.menu.yml
 ├── geoapify_importer.routing.yml
-└── geoapify_importer.links.menu.yml
+├── geoapify_importer.services.yml
+├── SPEC.md
+└── .gitignore
 ```
 
 Note the `Service/Poi/` subdirectory: it keeps POI-specific classification logic separate from shared ingestion infrastructure (`GeoapifyClient`, `SourceFileWriter`, `AddressVerifier`, `ChangeDetector`, `PlaceIdentity`), per the Architecture Goal.
@@ -213,7 +240,7 @@ field_meta_description (string)
 field_poi_category     (entity_reference -> POI category taxonomy, 72 terms)
 ```
 
-**New implementation note (this session):** `field_poi_location` uses the **Geolocation module**, which expects a specific structure (lat/lng keyed), not a raw coordinate pair. The eventual POI-creation service will need a small transform step converting Geoapify's `geometry.coordinates` (`[lon, lat]` order) into the Geolocation module's expected field structure. Not yet implemented.
+**Location:** `field_poi_location` uses the Geolocation module; Geoapify's `[lon, lat]` is converted by `CoordinateTransformer` (built, verified via an actual write).
 
 ### POI Address — clarified relationship (unchanged from prior revision)
 
@@ -327,12 +354,12 @@ The fetch command now runs `PoiCategoryClassifier` on every fetched place and re
 ### `PoiNodeCreator` — node creation, CREATE ONLY, built and verified
 
 - Class: `Drupal\geoapify_importer\Service\Poi\PoiNodeCreator`. Service: `geoapify_importer.poi_node_creator`.
-- **Scope, deliberately narrow: CREATE ONLY, never updates an existing node.** Updating requires applying the field ownership matrix per-field (title never changes after creation; location always re-syncs; category/address need review-aware fill-if-empty logic) — a distinct, NOT YET BUILT piece.
+- **Creates only; it never updates an existing node.** Updating is `PoiNodeUpdater` (see "Node Updates").
 - Only called for places already resolved to a real term by `PoiCategoryMapper` — `needs_review` and `UNMAPPED` places get no node yet.
 - New field `field_source_storage_key` (string) — now shared across BOTH `point_of_interest` and `listing` bundles (one field storage, two field instances), storing the `PlaceIdentity` key a node came from — the node-level duplicate-detection mechanism the spec previously flagged as undesigned. `findExistingNodeId()` checks this before creating, and is PUBLIC (not just used internally) specifically so dry-run reporting can check existence without triggering a write — see "Production Field Deployment" section for why this changed.
 - **Every created node is UNPUBLISHED.** Publishing is an editorial decision, not an import one.
 - `field_poi_location` set via `CoordinateTransformer` (see below). `field_poi_address` populated only when `AddressVerifier` reports `STATUS_VERIFIED`; otherwise left empty, per the field ownership matrix's `SOURCE_ASSISTED_REVIEW` default.
-- `field_canadian_towns` is NOT set by this version — Geoapify's `properties.city` is free text; resolving it to a real taxonomy term is a separate, NOT YET BUILT piece, distinct from `TownBoundaryResolver` (which goes the opposite direction: town → search area, not place → town).
+- `field_canadian_towns` is set from the optional `$town_tid` argument (the town the import was searching; see "Town and Address Connection"). With no town passed, nothing is set. The node holds ONE term, the town; the province is that term's parent.
 - **Real bug found and fixed:** a place with no `name` property (a real, common case for some OSM features — e.g. an unnamed school field or park segment) was being counted as a generic `error`. This is expected, not a failure. Now split into its own `no_name` outcome, both in `PoiNodeCreator`'s own result and in `PoiImportProcessor`'s aggregate counts.
 - **Verified end-to-end:** Heritage Village created correctly (title, category via the mapper, transformed location, correctly-empty address). Re-running creation for the same place correctly returned `skipped_existing` with the same node ID — no duplicate. At real scale (Taber's 46 places): 10 correctly matched already-existing nodes, 1 correctly held for review, 28 correctly unmapped, 7 correctly separated as `no_name`, 0 genuine errors.
 
@@ -346,8 +373,8 @@ The fetch command now runs `PoiCategoryClassifier` on every fetched place and re
 ### `PoiImportProcessor` — orchestrates mapping + creation, wired into `geoapify:import`
 
 - Class: `Drupal\geoapify_importer\Service\Poi\PoiImportProcessor`. Service: `geoapify_importer.poi_import_processor`.
-- Consumes `TownImportRunner`'s `processed` list (every place it saw, each with its classification result — collected regardless of file-change status, since a place with an unchanged file can still lack a node). Runs the mapper + creator for `pending_mapping` places; does nothing for `ignored`/`needs_review`.
-- `geoapify:import` reports POI-stage results (created, existing, needs_review, unmapped, ignored, no_name, errors) alongside the existing ingestion stats, per-town and in a final summary table.
+- Consumes `TownImportRunner`'s `processed` list (every place it saw, each with its classification result and `town_tid`, collected regardless of file-change status). For `pending_mapping` places that map to a term: creates a node if none exists, otherwise sends the existing node to `PoiNodeUpdater`; does nothing for `ignored`/`needs_review`.
+- `geoapify:import` reports POI-stage results (created, updated, in sync, needs_review, unmapped, ignored, no-name, errors) alongside the ingestion stats, per town and in a final table, plus one line per updated node.
 - A future Listing importer would reuse `TownImportRunner`'s same output with its own processor — this is why `TownImportRunner` itself has no taxonomy-mapping or node-creation knowledge.
 
 ## Alternative Data Source Evaluation — AnythingPOI (evaluated, REJECTED; staying on Geoapify)
@@ -414,10 +441,10 @@ A 5GB Canada-wide POI dataset (`anythingpoi_canada_v0.1`, Zenodo, DOI 10.5281/ze
 **`GeoapifyClient::forwardGeocode()`** — new method, Forward Geocoding API (`https://api.geoapify.com/v1/geocode/search`). Resolves free text (a town name) to a place, used specifically to find a town's administrative boundary.
 
 **`TownBoundaryResolver`** — new service, `geoapify_importer.town_boundary_resolver`. Lives directly under `Service/` (shared infrastructure, not POI-specific).
-- `resolve(int $tid, string $town_name, ?string $province_code): ?string` — returns a Geoapify place_id suitable for `filter=place:{id}`, or NULL if no sufficiently confident boundary could be resolved.
+- `resolve(int $tid, string $town_name, ?string $province_code, float $known_lat, float $known_lon): ?string` — returns a Geoapify place_id suitable for `filter=place:{id}`, or NULL if no sufficiently confident, geographically plausible boundary could be resolved. A candidate more than 50 km from the town's own known coordinates is rejected as a likely same-named town elsewhere.
 - Caches successful resolutions to `private://geoapify_importer/towns/{tid}/boundary.json` (atomic write, same pattern as `SourceFileWriter`). Does not cache failures.
 - **Confidence threshold:** requires `match_type='full_match'` AND `confidence=1`, together. **Verified as necessary, not just cautious**, via a real case: Tadmore, BC (a Hamlet) returned `full_match` but `confidence=0`, and was correctly rejected only because both conditions are required jointly — `match_type` alone would have wrongly accepted it. Tahsis, BC (Village) and Taber, AB (Town) both resolved correctly at this threshold, alongside the earlier Fort McMurray and Calgary results.
-- **Does NOT perform the circle fallback itself** — callers must do that when `resolve()` returns NULL. That fallback wiring, and the per-town import loop that would actually use this resolver, are NOT YET BUILT. This is the resolver verified in isolation via `drush php:eval`, not yet wired into `geoapify:fetch` or any import command.
+- The resolver does not perform the circle fallback itself; `TownImportRunner` does (a 15 km circle around the town's `field_geolocation` when `resolve()` returns NULL). Built and verified at real scale (see `geoapify:import`).
 - **Not yet tested:** a town name colliding with a larger, more famous place elsewhere; a town entirely absent from OpenStreetMap's data.
 
 ## Dev Tooling — NEW THIS SESSION
@@ -437,7 +464,7 @@ A 5GB Canada-wide POI dataset (`anythingpoi_canada_v0.1`, Zenodo, DOI 10.5281/ze
 
 ## Ingestion / Synchronization Design (mostly unchanged — not yet implemented)
 
-- Drupal cron, Queue API, further Drush commands (`geoapify:import`, `geoapify:check-updates`, `geoapify:status`), pagination, rate limiting, error handling beyond what exists, node-level duplicate detection, review workflows. (File-level change detection is built; see "Change Detection".)
+- Not yet built: Drupal cron / Queue API wiring (unattended operation), `geoapify:check-updates`, `geoapify:status`, pagination, review workflows. Built: change detection, node-level duplicate detection, global rate limiting, `geoapify:import`.
 - `geoapify:fetch` (above) is a new, real, narrower precursor to `geoapify:import` — not a replacement for it.
 
 ## Record Identity / Duplicate Detection — CORRECTED
@@ -455,7 +482,7 @@ A 5GB Canada-wide POI dataset (`anythingpoi_canada_v0.1`, Zenodo, DOI 10.5281/ze
 
 **Known limitation:** if an OSM object is deleted and recreated it gets a new ID and will look like a new place. The fallback duplicate detection the original spec called for (coordinates; normalized name plus geographic context) is the intended safety net and is not yet implemented.
 
-**Not yet designed:** node-level duplicate detection, meaning how a Drupal node records which storage key it came from so a re-import updates that node instead of creating another. This probably needs a field on the node (on both POI and Listing) and is required before any node-creation service is built.
+**Node-level duplicate detection (built):** each node stores the storage key it came from in `field_source_storage_key` (one field storage shared by `point_of_interest` and `listing`); `PoiNodeCreator::findExistingNodeId()` checks it before creating, and `PoiImportProcessor` routes existing nodes to `PoiNodeUpdater`.
 
 ## Import Statuses (unchanged, not yet implemented)
 
@@ -474,6 +501,58 @@ Two further rules from this revision:
 - **Do not treat an external identifier as stable or unique until it has been tested across at least two differing requests.** The Geoapify `place_id` was assumed stable and was not; the error surfaced only when the same place was fetched by two different queries.
 - **Keep directory names and namespace segments identical in case.** macOS hides mismatches that Linux production will not.
 
+## Node Updates — BUILT AND VERIFIED
+
+- Class `Drupal\geoapify_importer\Service\Poi\PoiNodeUpdater`; service `geoapify_importer.poi_node_updater` (arguments: `@entity_type.manager`, `@geoapify_importer.coordinate_transformer`, `@datetime.time`, `@logger.channel.geoapify_importer`).
+- Brings an EXISTING POI node up to date from a fresh Geoapify feature, applying the field ownership matrix per field:
+  - Title: never touched (editors rename places).
+  - `field_poi_location`: re-synced only when the place has moved more than 50 m (same tolerance as `ChangeDetector`).
+  - `field_poi_category`: filled only if empty; an existing value, especially an editor's, is never overwritten.
+  - `field_canadian_towns`: filled only if empty, from the town the import found the place under.
+  - `field_poi_address`: filled only if empty and the Places data itself has a house number and street. It deliberately does NOT use the reverse-geocode fallback: on update runs that would spend a metered request per run for every place that will never have an address.
+  - Everything else (description, hero image, meta description, tags, publish status): never touched.
+- Every real change is saved as a NEW REVISION with the log message "Updated by Geoapify Importer: <fields>", so editors can see and revert what the importer did.
+- `PoiImportProcessor` sends a place whose node already exists (found via `field_source_storage_key`) to the updater, in dry runs too (the updater is told not to save, so a dry run reports exactly what a real run would do). Counts: `nodes_created`, `nodes_updated`, `nodes_unchanged` (replacing `nodes_skipped_existing`), `no_name`, and so on. `geoapify:import` prints one line per updated node.
+- LIMITATION: only places that currently classify as `pending_mapping` and map to a term are updated; a node whose place has since become `needs_review` or unmapped is left alone.
+- **Verified on Taber (real devtop data):** the dry run reported 10 nodes in sync. After deliberately moving one node's location about 500 m and renaming it as an editor would, and clearing another's category, the dry run reported exactly those two changes without saving; the real run applied both; the editor's title survived; each change appeared as a revision with the log message; a repeat run reported 0 updates. Also checked in a sandbox with stand-ins for Drupal's node classes (33 checks: tolerance, never-overwrite rules, a dry run saves nothing, bad input). The real save and revision calls were exercised only by the Taber run.
+
+## Town and Address Connection — DECIDED; MECHANISM BUILT; NOT YET VERIFIED ON REAL DATA
+
+**Production field facts (read-only inspection):**
+- `field_canadian_towns` (POI and Listing): entity reference to the `canadian_towns` vocabulary, cardinality 1, not required. The node therefore holds ONE term, the town; the province is that term's parent (the vocabulary is one level: province, then town). Example: Taber (type Town, `field_province_code` AB) has the single parent Alberta. Term IDs differ between production and devtop (Taber is 163693 on production, 5733 on devtop).
+- `field_poi_address` (POI) and `field_street_address` (Listing): Address module, Canada only, cardinality 1. Address line 1 and postal code are required once an address is entered; locality, province, address lines 2 and 3, dependent locality, sorting code, organization and the name fields are hidden. The POI field is optional; the Listing field is required.
+
+**What the devtop data showed** (1,115 stored places; 257 of them would become nodes, meaning `pending_mapping` and mapped):
+- Address: none of the 257 has both a house number and a street (7 have a house number, none has a street; most are parks). Across all 1,115 places: 150 have a house number, 699 a street and 738 a postcode; 139 have house number plus street, and all 139 also have a valid Canadian postcode. The 139 existing nodes have no addresses.
+- Town by name: matching a place's Geoapify `city` and `state_code` to a town term (name plus province code, town-level terms only) matched only 29 of the 257 (11%); 216 matched nothing and 12 had no city or province. Some misses are naming differences ("Town of Trenton", "Terrace Bay Township", "East Ferris Township"); for plain names such as Brantford, North Bay and Hamilton the cause was not determined (devtop's taxonomy differs from production's, so this may be devtop-specific). Conclusion: name matching is not a reliable way to find a place's town.
+- Place Details (Marine Park Museum, one place): returns street, city, province code, postcode, county, suburb and formatted address, but no house number; the same street and postcode were already in the Places record. No gain for addresses on that sample.
+
+**Decision:** the town is the one the import was searching when it found the place: boundary search first, 15 km circle fallback, and the fallback ALSO assigns the town. It is decided once, in the shared `TownImportRunner`, and applied by each content type's creator and updater, so Listings reuse it. No name matching and no new service. Where search areas overlap, the first town to reach a place wins (the town is only filled when empty).
+
+**Built (saved on devtop after commit 085e15d; not yet committed):**
+- `TownImportRunner`: each place handed over carries `town_tid`.
+- `PoiImportProcessor`: passes `$entry['town_tid']` to the creator and updater.
+- `PoiNodeCreator::create(..., ?int $town_tid = NULL)`: sets `field_canadian_towns` when given.
+- `PoiNodeUpdater::update(..., bool $dry_run = FALSE, ?int $town_tid = NULL)`: fills it only if empty.
+- Sandbox checks (stand-ins) pass; not yet run against real nodes.
+
+**OPEN BLOCKER:** devtop's `point_of_interest` type has no `field_canadian_towns` (the Taber dry run after these changes reported 0 updates, as expected). The field's storage already exists on devtop as an entity reference, the same as production's (it is on devtop's Listing; the earlier report that it was a geolocation field was wrong, per the field comparison below). It only needs attaching to POI; no deletion is needed. Not done.
+
+**Built, then dropped (recorded so they are not rebuilt):**
+- `PlaceAddress` (town matching by name, province and distance, plus an address-value builder with a Canadian postcode check): dropped. The town matching is unnecessary and unreliable (above), and the address builder is not needed because no node-eligible place has a street. For Listings, businesses do have addresses, so a shared builder with a postcode guard may be worth building then: the Address field requires a postal code once an address is entered, so an address without one would probably block an editor's save.
+- `GeoPoint` (one shared distance and circle-filter helper): set aside by the project owner. The distance formula still exists separately in `ChangeDetector`, `TownBoundaryResolver` and `PoiNodeUpdater`; consolidation is not scheduled.
+
+**Known issue, not fixed:** `PoiNodeCreator` builds the address from the Places data's house number and street even when the address was verified through the reverse-geocode fallback, where those fields would not be present. It only matters if `reverse_geocode_enabled` is turned on (default off).
+
+**Spec gap corrected:** the boundary-then-circle plan had been recorded only for the search area; the link from the search area to the node's town was not recorded until this revision.
+
+## Working Agreements
+
+- Check this spec and the repository before proposing work. Do not add code that the data or the repository do not show is needed; use read-only `drush php:eval` checks to find out first.
+- One step per message: one file or one command, then wait for the output before the next. Deliver whole files, not fragments.
+- Shared logic belongs in shared infrastructure (`src/Service/`, not `Poi/`) so Listings can reuse it. Decide where logic lives before writing it.
+- Confirm a file is actually in place on the server (`ls`, `php -l`, a `grep -c` for a known string) before testing anything that depends on it.
+
 ## Production Field Deployment — NEW, BUILT (not yet applied to production)
 
 **Two different treatments for two different kinds of fields, deliberately:**
@@ -487,10 +566,107 @@ Two further rules from this revision:
 
 **Status: built, verified on devtop via `drush updatedb`, NOT YET applied to production.** This is real, necessary groundwork for eventual production deployment, but production itself has not been touched.
 
+## Original Specification Details (restored)
+
+These parts of the original specification were dropped when this document was first rewritten (the initial mapping table was replaced by a "not reproduced here" note). They are restored here from the original document. Status notes mark where later decisions supersede them.
+
+### POI Address (original)
+
+- Field: `field_poi_address`; storage `node.field_poi_address`; type `address`; module `address`.
+- Current Canadian configuration:
+  - Canada available.
+  - Address line 1 required.
+  - Postal code required.
+  - Locality is hidden, because town/province relationships are represented through the Canadian Towns taxonomy.
+  - Other personal-name/address components are hidden as configured.
+- *Status:* confirmed by a read-only inspection of production's field settings (also administrative area, address lines 2 and 3, dependent locality, sorting code and organization are hidden).
+
+### POI Taxonomy (original)
+
+- The POI Category taxonomy contains 72 terms: 8 parent categories and 64 child categories.
+- Parent categories: Arts & Attractions, History & Heritage, Landmarks & Structures, Nature & Landscapes, Parks, Religious & Sacred Places, Trails & Routes, Unusual & Quirky.
+- The taxonomy is user-facing and editorial. Do not treat taxonomy term IDs as permanent mapping logic. Geoapify category mapping must be data-driven and should use stable taxonomy identifiers such as vocabulary/term UUIDs, or another maintainable configuration strategy where appropriate.
+- Schema.org mapping is a separate concern from the editorial taxonomy.
+- *Status:* the 72-term structure has not been re-verified since the original; devtop's and production's taxonomy content differ. Mapping is now done by tagging terms with `field_geoapify_categories` (see "`PoiCategoryMapper`").
+
+### Initial Geoapify Mapping Direction (original — historical starting point)
+
+These mappings were a starting point and were to be verified against Geoapify's category documentation before being treated as authoritative:
+
+```
+entertainment.museum              -> History & Heritage / Museums
+entertainment.aquarium            -> Arts & Attractions / Aquariums
+entertainment.zoo                 -> Arts & Attractions / Zoos & Wildlife Attractions
+entertainment.theme_park          -> Arts & Attractions / Amusement Parks
+entertainment.culture.arts_centre -> Arts & Attractions / Cultural Centres
+entertainment.culture.gallery     -> Arts & Attractions / Galleries
+entertainment.culture.theatre     -> Arts & Attractions / Theatres
+leisure.playground                -> Parks / Playgrounds
+leisure.park.garden               -> Parks / Gardens
+leisure.park.nature_reserve       -> Nature & Landscapes / Wildlife Areas or review
+leisure.park                      -> Parks / conditional
+man_made.bridge                   -> Landmarks & Structures / Bridges
+man_made.lighthouse               -> Landmarks & Structures / Lighthouses
+man_made.tower                    -> Landmarks & Structures / Towers & Observation Structures
+man_made.pier                     -> Landmarks & Structures / Wharves & Piers
+waterway.channels                 -> Landmarks & Structures / Canals & Locks
+natural.mountain                  -> Nature & Landscapes / Mountains
+natural.mountain.cave_entrance    -> Nature & Landscapes / Caves
+natural.mountain.cliff            -> Nature & Landscapes / Geologic Features
+natural.forest                    -> Nature & Landscapes / Forests
+heritage.unesco                   -> History & Heritage / conditional
+```
+
+- Mappings were to support at least DIRECT, CONDITIONAL, IGNORE and UNMAPPED. Unmapped source categories must not silently become arbitrary POI categories.
+- *Status:* all 21 category strings exist in Geoapify's live category list (pulled earlier, 833 categories). The table is superseded in two ways: (1) `PoiCategoryClassifier` now sends museum, zoo, aquarium, theme park, arts centre, gallery and theatre to `needs_review` (ownership decides), and commercial categories to `ignored`; (2) a static table was replaced by dynamic tagging of `poi_category` terms. Only DIRECT is implemented; CONDITIONAL is not. The table remains a useful guide to which term each category should be tagged to.
+
+### Record Identity rules (original)
+
+- Duplicate detection must be deterministic and logged.
+- Do not create duplicate Drupal POIs merely because a source response was re-imported.
+- *Status:* the preferred identity was originally Geoapify's place ID; that was disproved and replaced (see "Record Identity / Duplicate Detection").
+
+### Architecture Goal (original)
+
+Shared infrastructure should eventually include: API client, raw source-file storage, source record reader, validation, classification, mapping, duplicate detection, change detection, logging, queue processing and import status tracking. POI-specific mapping stays separate from shared ingestion infrastructure, so a future Listing importer can reuse the common framework without POI-specific rules being forced onto Listings.
+
+### Development Rules (original, complete list)
+
+- Work locally unless explicitly instructed otherwise.
+- Never assume a `web/` directory exists.
+- Never modify production while developing.
+- Verify Drupal paths before giving commands.
+- Use one controlled implementation step at a time.
+- Verify each step before proceeding.
+- Do not claim a Drupal, YAML or PHP behavior without verification.
+- Preserve working code unless a change is necessary.
+- Prefer non-destructive changes.
+- Do not create SQL storage for raw source data.
+- Do not put persistent raw source files inside the module directory.
+- Do not hardcode taxonomy term IDs into business logic when a maintainable mapping mechanism can be used.
+- Do not build the entire importer in one step.
+- Separate verified facts from proposed design.
+- When an assumption is required, identify it as an assumption and verify it before relying on it.
+
+## Devtop vs Production Field Comparison
+
+A read-only command (type, cardinality, required, and a fingerprint of the storage and field settings) was run on both environments. Display configuration (form and view modes) was not compared. Nothing has been changed yet; the plan is to bring devtop in line by config export and import from production, not by hand-creating fields, after a database backup.
+
+- **`node.point_of_interest`:** devtop is missing `field_canadian_towns`, `field_poi_tags` and `field_meta_description`. `field_poi_address` and `field_poi_category` have the same storage but different field settings (created by hand with defaults). Devtop only: `field_location` (geofield) and the module's `field_source_storage_key`. `field_description`, `field_hero_image` and `field_poi_location` match.
+- **`node.listing`:** devtop is missing `field_meta_description`. Devtop only: `field_final_score`, `field_local_employees`, `field_percent_sourced_locally`, `field_total_employees` and `field_source_storage_key`.
+- **`taxonomy_term.poi_category`:** matches, apart from the module's `field_geoapify_categories` on devtop.
+- **`taxonomy_term.canadian_towns`:** devtop is missing `field_description`, `field_hero_image`, `field_listing_category` and `field_meta_description`; it has `field_postcode_area` where production has `field_postalcode_area`; `field_city_id`, `field_county`, `field_province_code` and `field_type` have different storage settings.
+- Devtop-only fields are to be left alone unless the project owner says otherwise.
+
 ## Current Verified State
 
 ### Verified, this stretch (in addition to everything verified previously)
 
+- **Node update logic** (`PoiNodeUpdater`) verified on real Taber data: location re-synced only past 50 m, category filled only when empty, an editor's title preserved, every change saved as a revision, a repeat run reporting 0 updates, and dry run reporting exactly what a real run does.
+- **Data scan of 1,115 stored places** (257 node-eligible): address and town-by-name findings recorded under "Town and Address Connection".
+- **Repository scan** (commit 085e15d): confirmed address building already existed in both the creator and the updater, that nothing set `field_canadian_towns`, and that the import already knows each place's town.
+- **Production field configuration** for `field_canadian_towns` and the address fields inspected and recorded.
+- **Town-passing change set** (4 files) saved on devtop; sandbox checks pass; real verification blocked by devtop's field mismatch.
 - **Full import pipeline complete end-to-end, at real scale:** `PoiCategoryMapper` (DIRECT mapping, live-tagged taxonomy), `PoiNodeCreator` (create-only, unpublished nodes), `CoordinateTransformer` (verified via actual write), `PoiImportProcessor` (orchestration) — all built, individually verified, and wired into `geoapify:import`. Real current scale: 139 POI nodes created, 1,115 raw places stored, across multiple towns.
 - A real node-creation bug found and fixed: "no usable name" was miscounted as a generic error — now split into its own `no_name` outcome.
 - `field_geoapify_categories`, `field_source_storage_key` added (dev-only stand-ins on devtop) and confirmed working for real mapping/dedup.
@@ -510,10 +686,9 @@ Two further rules from this revision:
 
 ### Not yet implemented / not yet resolved
 
-- **Node UPDATE logic** (applying the field ownership matrix per-field to an already-existing node — title never changes, location always re-syncs, category/address fill-if-empty) — now the single biggest open item in the POI pipeline; `PoiNodeCreator` is explicitly create-only
 - **Production field deployment is BUILT but NOT YET APPLIED** — `config/install` YAML + `hook_update_10001()` exist and are verified working on devtop, but production itself has not had this module's fields deployed. This is the real, concrete next step before production use.
 - Cron/queue wiring was never built despite being explicitly requested ("let it work away") — `geoapify:import` still requires manual invocation
-- `field_canadian_towns` resolution — Geoapify's free-text `properties.city` has no path to a real `canadian_towns` term yet; not built
+- `field_canadian_towns`: mechanism built (the town is passed from the import to the creator and updater) but NOT verified on real data; blocked by devtop's field mismatch. Changes saved on devtop, not yet committed.
 - Cron/queue wiring for unattended operation — `geoapify:import` still requires manual invocation; the spec's original plan for Drupal cron/Queue API integration is unbuilt
 - Whether Anzac/Gregoire are their own `canadian_towns` terms or expected to be covered under Fort McMurray — raised, not checked
 - Whether `field_type` (Locality/Hamlet/Village/Town/City) should skip boundary resolution for `Locality` terms — plausible, not decided or built
@@ -528,3 +703,8 @@ Two further rules from this revision:
 - Coordinate tolerance (50 m) tuning against real data at larger scale, especially for large outlines
 - `operator`/`owner` enrichment fields as a possible automated resolver for `needs_review` ownership ambiguity — noted as promising, not built
 - Remaining Drush commands (`geoapify:check-updates`, `geoapify:status`), import status persistence, production deployment of this module
+- **Devtop is missing `field_canadian_towns` on `point_of_interest`.** Attach the existing field (entity reference to `canadian_towns`, cardinality 1) to POI before the town fill can be verified. See "Devtop vs Production Field Comparison".
+- For Listings: a shared address builder with a postcode guard, if Listing creation is built (see "Town and Address Connection").
+- Consolidating the duplicated distance code (`ChangeDetector`, `TownBoundaryResolver`, `PoiNodeUpdater`): discussed, set aside, not scheduled.
+- Latent creator issue: address built from Places data after a reverse-geocode verification (only matters if that setting is on).
+- Commit of the town-passing changes (`TownImportRunner`, `PoiImportProcessor`, `PoiNodeCreator`, `PoiNodeUpdater`) is pending.

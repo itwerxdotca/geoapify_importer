@@ -31,7 +31,11 @@ use Psr\Log\LoggerInterface;
  *   parks). The fallback still applies at creation time.
  * - Everything else (description, hero image, meta description, tags, and
  *   anything else on the node): EDITORIAL_LOCKED / unmanaged. Never touched.
- * - field_canadian_towns: not handled — no place-to-town resolver exists yet.
+ * - field_canadian_towns: SOURCE_ASSISTED_REVIEW. Filled ONLY if currently
+ *   empty, from the town the import found the place under ($town_tid: the
+ *   boundary search, or the circle fallback). A town already on the node,
+ *   especially one an editor chose, is never overwritten. The node holds
+ *   ONE term, the town; its province is that term's parent.
  *
  * Unpublished or published, status is never changed.
  *
@@ -67,6 +71,9 @@ class PoiNodeUpdater {
    *   The term PoiCategoryMapper resolved for this place.
    * @param bool $dry_run
    *   If TRUE, work out what WOULD change but save nothing.
+   * @param int|null $town_tid
+   *   The town the import found this place under. Filled in only if the
+   *   node has no town yet.
    *
    * @return array
    *   - status: 'updated', 'unchanged', or 'error'.
@@ -75,7 +82,7 @@ class PoiNodeUpdater {
    *   - fields: names of the fields changed (or, in a dry run, that would be).
    *   - message: present on 'error'.
    */
-  public function update(int $nid, array $feature, TermInterface $category_term, bool $dry_run = FALSE): array {
+  public function update(int $nid, array $feature, TermInterface $category_term, bool $dry_run = FALSE, ?int $town_tid = NULL): array {
     $node = $this->entityTypeManager->getStorage('node')->load($nid);
 
     if ($node === NULL || $node->bundle() !== 'point_of_interest') {
@@ -91,6 +98,7 @@ class PoiNodeUpdater {
     $changes = array_filter([
       'field_poi_location' => $this->locationChange($node, $feature),
       'field_poi_category' => $this->categoryChange($node, $category_term),
+      'field_canadian_towns' => $this->townChange($node, $town_tid),
       'field_poi_address' => $this->addressChange($node, $properties),
     ], static fn($value) => $value !== NULL);
 
@@ -175,6 +183,16 @@ class PoiNodeUpdater {
     }
 
     return $new;
+  }
+
+  /**
+   * Town value to fill in, or NULL if there is none to give or the node has one.
+   */
+  protected function townChange(object $node, ?int $town_tid): ?array {
+    if ($town_tid === NULL || !$node->hasField('field_canadian_towns') || !$node->get('field_canadian_towns')->isEmpty()) {
+      return NULL;
+    }
+    return ['target_id' => $town_tid];
   }
 
   /**

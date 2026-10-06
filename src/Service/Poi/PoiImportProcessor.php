@@ -44,7 +44,9 @@ class PoiImportProcessor {
    *
    * @param array $processed
    *   The 'processed' array from a TownImportRunner::importTown() result
-   *   — each entry has 'key', 'feature', and 'classification'.
+   *   — each entry has 'key', 'feature', 'classification', and 'town_tid'
+   *   (the town the place was found under; passed on to node creation and
+   *   updating, which connect the node to that town).
    * @param bool $dry_run
    *   If TRUE, everything is worked out and reported exactly as a real run
    *   would, but nothing is created or saved.
@@ -111,7 +113,7 @@ class PoiImportProcessor {
       $existing_nid = $this->creator->findExistingNodeId($entry['key']);
       if ($existing_nid !== NULL) {
         try {
-          $result = $this->updater->update($existing_nid, $entry['feature'], $mapped['term'], $dry_run);
+          $result = $this->updater->update($existing_nid, $entry['feature'], $mapped['term'], $dry_run, $entry['town_tid'] ?? NULL);
         }
         catch (\Throwable $e) {
           $counts['errors']++;
@@ -156,7 +158,7 @@ class PoiImportProcessor {
       }
 
       try {
-        $result = $this->creator->create($entry['key'], $entry['feature'], $mapped['term']);
+        $result = $this->creator->create($entry['key'], $entry['feature'], $mapped['term'], $entry['town_tid'] ?? NULL);
       }
       catch (\Throwable $e) {
         $counts['errors']++;

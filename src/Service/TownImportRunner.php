@@ -289,6 +289,10 @@ class TownImportRunner {
             'feature' => $feature,
             'classification' => $classification,
             'change_status' => $status,
+            // The town this place was found under (boundary search, or the
+            // circle fallback), so whatever creates or updates the node, POI
+            // or Listing, can connect it to that town.
+            'town_tid' => $tid,
           ];
 
           $summary[$status]++;

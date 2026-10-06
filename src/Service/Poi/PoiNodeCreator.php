@@ -16,7 +16,10 @@ use Psr\Log\LoggerInterface;
  * - CREATE ONLY. This does not update existing nodes.
  * - Only call this for a place that PoiCategoryMapper has already
  *   resolved to a real term.
- * - field_canadian_towns is NOT set by this version.
+ * - field_canadian_towns is set from the town the import was searching,
+ *   when the caller passes $town_tid (boundary search first, 15 km circle
+ *   fallback; see TownImportRunner). The node holds ONE term, the town;
+ *   the province is that term's parent. With no $town_tid, no town is set.
  * - field_poi_address is populated only when AddressVerifier reports
  *   STATUS_VERIFIED.
  * - Every created node is UNPUBLISHED.
@@ -38,13 +41,17 @@ class PoiNodeCreator {
   /**
    * Creates a POI node, or reports why one wasn't created.
    *
+   * @param int|null $town_tid
+   *   The canadian_towns term the import was searching when it found this
+   *   place. When given, it is set as the node's town.
+   *
    * @return array
    *   - status: 'created', 'skipped_existing', or 'error'.
    *   - nid: the node ID, if created or already existing.
    *   - address_verified: bool, whether field_poi_address was populated.
    *   - message: present on 'error'.
    */
-  public function create(string $storage_key, array $feature, TermInterface $category_term): array {
+  public function create(string $storage_key, array $feature, TermInterface $category_term, ?int $town_tid = NULL): array {
     $existing_nid = $this->findExistingNodeId($storage_key);
     if ($existing_nid !== NULL) {
       return [
@@ -70,6 +77,10 @@ class PoiNodeCreator {
       self::STORAGE_KEY_FIELD => $storage_key,
       'field_poi_category' => ['target_id' => $category_term->id()],
     ];
+
+    if ($town_tid !== NULL) {
+      $values['field_canadian_towns'] = ['target_id' => $town_tid];
+    }
 
     $coordinates = $feature['geometry']['coordinates'] ?? NULL;
     if (is_array($coordinates)) {
