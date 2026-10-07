@@ -74,6 +74,10 @@ class PoiNodeUpdater {
    * @param int|null $town_tid
    *   The town the import found this place under. Filled in only if the
    *   node has no town yet.
+   * @param array $field_values
+   *   Extra field values keyed by field name (for example website, phone,
+   *   hours). Each is filled in only if the node has that field and it is
+   *   empty, so an editor's value is never overwritten.
    *
    * @return array
    *   - status: 'updated', 'unchanged', or 'error'.
@@ -82,7 +86,7 @@ class PoiNodeUpdater {
    *   - fields: names of the fields changed (or, in a dry run, that would be).
    *   - message: present on 'error'.
    */
-  public function update(int $nid, array $feature, TermInterface $category_term, bool $dry_run = FALSE, ?int $town_tid = NULL): array {
+  public function update(int $nid, array $feature, TermInterface $category_term, bool $dry_run = FALSE, ?int $town_tid = NULL, array $field_values = []): array {
     $node = $this->entityTypeManager->getStorage('node')->load($nid);
 
     if ($node === NULL || $node->bundle() !== 'point_of_interest') {
@@ -101,6 +105,12 @@ class PoiNodeUpdater {
       'field_canadian_towns' => $this->townChange($node, $town_tid),
       'field_poi_address' => $this->addressChange($node, $properties),
     ], static fn($value) => $value !== NULL);
+
+    foreach ($field_values as $field => $value) {
+      if (isset($changes[$field]) === FALSE && $node->hasField($field) && $node->get($field)->isEmpty()) {
+        $changes[$field] = $value;
+      }
+    }
 
     $result = [
       'status' => $changes === [] ? 'unchanged' : 'updated',

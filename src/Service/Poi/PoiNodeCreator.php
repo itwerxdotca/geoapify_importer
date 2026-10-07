@@ -45,13 +45,19 @@ class PoiNodeCreator {
    *   The canadian_towns term the import was searching when it found this
    *   place. When given, it is set as the node's town.
    *
+   * @param array $field_values
+   *   Extra field values to set on the new node, keyed by field name (for
+   *   example website, phone, hours). Built by the caller; the creator does not
+   *   know what they mean. Never overrides the title, status, category, town,
+   *   location or address set here.
+   *
    * @return array
    *   - status: 'created', 'skipped_existing', or 'error'.
    *   - nid: the node ID, if created or already existing.
    *   - address_verified: bool, whether field_poi_address was populated.
    *   - message: present on 'error'.
    */
-  public function create(string $storage_key, array $feature, TermInterface $category_term, ?int $town_tid = NULL): array {
+  public function create(string $storage_key, array $feature, TermInterface $category_term, ?int $town_tid = NULL, array $field_values = []): array {
     $existing_nid = $this->findExistingNodeId($storage_key);
     if ($existing_nid !== NULL) {
       return [
@@ -80,6 +86,12 @@ class PoiNodeCreator {
 
     if ($town_tid !== NULL) {
       $values['field_canadian_towns'] = ['target_id' => $town_tid];
+    }
+
+    foreach ($field_values as $field => $value) {
+      if (isset($values[$field]) === FALSE) {
+        $values[$field] = $value;
+      }
     }
 
     $coordinates = $feature['geometry']['coordinates'] ?? NULL;

@@ -90,3 +90,112 @@ function geoapify_importer_update_10001() {
   }
   return t('Fields created, if not already present.');
 }
+
+/**
+ * Implements hook_install().
+ *
+ * Creates the POI detail fields on a fresh install (config/install only
+ * covers the module's earlier fields).
+ */
+function geoapify_importer_install() {
+  _geoapify_importer_create_detail_fields();
+}
+
+/**
+ * Creates the POI detail fields and the amenity-mapping field.
+ */
+function geoapify_importer_update_10002() {
+  $created = _geoapify_importer_create_detail_fields();
+  return t('Created: @fields', ['@fields' => $created ? implode(', ', $created) : 'nothing (all already present)']);
+}
+
+/**
+ * Creates the fields that hold Place Details data on point_of_interest, and
+ * the term field that maps Geoapify facility names to poi_amenities terms.
+ *
+ * Safe to run more than once: anything that already exists is left alone.
+ * Skips what its dependencies are missing (no point_of_interest type, or no
+ * poi_amenities vocabulary). Returns the names of the fields it created.
+ */
+function _geoapify_importer_create_detail_fields(): array {
+  $created = [];
+
+  if (\Drupal::entityTypeManager()->getStorage('node_type')->load('point_of_interest') === NULL) {
+    return $created;
+  }
+  $has_amenities = \Drupal\taxonomy\Entity\Vocabulary::load('poi_amenities') !== NULL;
+
+  // name => [type, label, cardinality, storage settings, instance settings]
+  $node_fields = [
+    'field_poi_website' => ['link', 'Website', 1, [], ['link_type' => 16, 'title' => 0]],
+    'field_poi_phone' => ['telephone', 'Phone', 1, [], []],
+    'field_poi_email' => ['email', 'Email', 1, [], []],
+    'field_poi_opening_hours' => ['string_long', 'Opening Hours', 1, [], []],
+    'field_poi_operator' => ['string', 'Operator', 1, ['max_length' => 255, 'is_ascii' => FALSE, 'case_sensitive' => FALSE], []],
+    'field_poi_amenities' => ['entity_reference', 'Amenities', -1, ['target_type' => 'taxonomy_term'], [
+      'handler' => 'default:taxonomy_term',
+      'handler_settings' => [
+        'target_bundles' => ['poi_amenities' => 'poi_amenities'],
+        'sort' => ['field' => 'name', 'direction' => 'asc'],
+        'auto_create' => FALSE,
+        'auto_create_bundle' => '',
+      ],
+    ]],
+  ];
+
+  foreach ($node_fields as $name => [$type, $label, $cardinality, $storage_settings, $settings]) {
+    if ($name === 'field_poi_amenities' && $has_amenities === FALSE) {
+      continue;
+    }
+    if (\Drupal\field\Entity\FieldStorageConfig::loadByName('node', $name) === NULL) {
+      \Drupal\field\Entity\FieldStorageConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'type' => $type,
+        'cardinality' => $cardinality,
+        'settings' => $storage_settings,
+        'translatable' => TRUE,
+      ])->save();
+    }
+    if (\Drupal\field\Entity\FieldConfig::loadByName('node', 'point_of_interest', $name) === NULL) {
+      \Drupal\field\Entity\FieldConfig::create([
+        'field_name' => $name,
+        'entity_type' => 'node',
+        'bundle' => 'point_of_interest',
+        'label' => $label,
+        'required' => FALSE,
+        'translatable' => FALSE,
+        'settings' => $settings,
+      ])->save();
+      $created[] = $name;
+    }
+  }
+
+  // Term field: which Geoapify facility names mean a place has this amenity.
+  if ($has_amenities) {
+    if (\Drupal\field\Entity\FieldStorageConfig::loadByName('taxonomy_term', 'field_geoapify_facilities') === NULL) {
+      \Drupal\field\Entity\FieldStorageConfig::create([
+        'field_name' => 'field_geoapify_facilities',
+        'entity_type' => 'taxonomy_term',
+        'type' => 'string',
+        'cardinality' => -1,
+        'settings' => ['max_length' => 255, 'is_ascii' => FALSE, 'case_sensitive' => FALSE],
+        'translatable' => TRUE,
+      ])->save();
+    }
+    if (\Drupal\field\Entity\FieldConfig::loadByName('taxonomy_term', 'poi_amenities', 'field_geoapify_facilities') === NULL) {
+      \Drupal\field\Entity\FieldConfig::create([
+        'field_name' => 'field_geoapify_facilities',
+        'entity_type' => 'taxonomy_term',
+        'bundle' => 'poi_amenities',
+        'label' => 'Geoapify Facilities',
+        'description' => 'Geoapify facility names (for example wheelchair) that mean a place has this amenity. One value per name.',
+        'required' => FALSE,
+        'translatable' => FALSE,
+      ])->save();
+      $created[] = 'field_geoapify_facilities';
+    }
+  }
+
+  return $created;
+}

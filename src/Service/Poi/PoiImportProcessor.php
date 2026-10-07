@@ -2,6 +2,7 @@
 
 namespace Drupal\geoapify_importer\Service\Poi;
 
+use Drupal\geoapify_importer\Service\PlaceInfo;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -36,8 +37,40 @@ class PoiImportProcessor {
     protected PoiCategoryMapper $mapper,
     protected PoiNodeCreator $creator,
     protected PoiNodeUpdater $updater,
+    protected PlaceInfo $placeInfo,
     protected LoggerInterface $logger,
   ) {}
+
+  /**
+   * The POI detail field values for a place, from its Places properties.
+   *
+   * The POI field names live here because this class is the POI-specific
+   * orchestrator; the creator and updater only apply what they are handed.
+   */
+  protected function detailFieldValues(array $properties): array {
+    $info = $this->placeInfo->fromProperties($properties);
+    $values = [];
+    if (isset($info['website'])) {
+      $values['field_poi_website'] = ['uri' => $info['website']];
+    }
+    if (isset($info['phone'])) {
+      $values['field_poi_phone'] = $info['phone'];
+    }
+    if (isset($info['email'])) {
+      $values['field_poi_email'] = $info['email'];
+    }
+    if (isset($info['opening_hours'])) {
+      $values['field_poi_opening_hours'] = $info['opening_hours'];
+    }
+    if (isset($info['operator'])) {
+      $values['field_poi_operator'] = $info['operator'];
+    }
+    $tids = $this->placeInfo->amenityTermIds($info['facilities'] ?? []);
+    if ($tids !== []) {
+      $values['field_poi_amenities'] = array_map(static fn($tid) => ['target_id' => $tid], $tids);
+    }
+    return $values;
+  }
 
   /**
    * Processes every place TownImportRunner collected for one town.
@@ -108,12 +141,14 @@ class PoiImportProcessor {
         continue;
       }
 
+      $field_values = $this->detailFieldValues($entry['feature']['properties'] ?? []);
+
       // Existing node: update it. Works the same in a dry run — the updater
       // is told not to save, so the report matches what a real run does.
       $existing_nid = $this->creator->findExistingNodeId($entry['key']);
       if ($existing_nid !== NULL) {
         try {
-          $result = $this->updater->update($existing_nid, $entry['feature'], $mapped['term'], $dry_run, $entry['town_tid'] ?? NULL);
+          $result = $this->updater->update($existing_nid, $entry['feature'], $mapped['term'], $dry_run, $entry['town_tid'] ?? NULL, $field_values);
         }
         catch (\Throwable $e) {
           $counts['errors']++;
@@ -158,7 +193,7 @@ class PoiImportProcessor {
       }
 
       try {
-        $result = $this->creator->create($entry['key'], $entry['feature'], $mapped['term'], $entry['town_tid'] ?? NULL);
+        $result = $this->creator->create($entry['key'], $entry['feature'], $mapped['term'], $entry['town_tid'] ?? NULL, $field_values);
       }
       catch (\Throwable $e) {
         $counts['errors']++;

@@ -8,8 +8,9 @@
 2. **Town connection decided and partly built.** The node's town is the town the import was searching (boundary first, circle fallback also assigns), decided once in the shared `TownImportRunner` and applied by the creator and updater. See "Town and Address Connection".
 3. **Repository and data scan.** Real counts from devtop showed that name-matching places to town terms resolves only 11% of node-eligible places, and that none of them has a street address. Both are recorded with the numbers.
 4. **Built, then dropped:** `PlaceAddress` and `GeoPoint`. Recorded so they are not rebuilt.
-5. **OPEN BLOCKER:** devtop's `point_of_interest` type has no `field_canadian_towns`. A field comparison run on both environments shows the field's storage on devtop is an entity reference like production's (it is already on devtop's Listing), so it only needs attaching to POI. The town fill cannot be verified until then.
-6. **Stale spec statements corrected** (module structure, node-level duplicate detection, node creation scope, the town resolver signature, the circle fallback). A new "Working Agreements" section records how work on this project is to be done.
+5. **Devtop and production POI/Listing fields matched, and the town connection verified.** A script with production's configuration built in (dry run by default, no deletions) brought 8 field objects in line after a database backup, including attaching `field_canadian_towns` to `point_of_interest`. Run against Taber (a boundary search), the import then connected all 10 existing nodes to their town, and a repeat run reported 0 updates.
+6. **Stale spec statements corrected** (module structure, node-level duplicate detection, node creation scope, the town resolver signature, the circle fallback), and the original spec sections that an earlier rewrite had dropped were restored (see "Original Specification Details (restored)").
+7. **Accepted difference:** devtop's `canadian_towns` term fields differ from production's. Production has over 26,000 terms; devtop is a smaller test set and does not need to match.
 
 **Previous pass:**
 
@@ -516,7 +517,7 @@ Two further rules from this revision:
 - LIMITATION: only places that currently classify as `pending_mapping` and map to a term are updated; a node whose place has since become `needs_review` or unmapped is left alone.
 - **Verified on Taber (real devtop data):** the dry run reported 10 nodes in sync. After deliberately moving one node's location about 500 m and renaming it as an editor would, and clearing another's category, the dry run reported exactly those two changes without saving; the real run applied both; the editor's title survived; each change appeared as a revision with the log message; a repeat run reported 0 updates. Also checked in a sandbox with stand-ins for Drupal's node classes (33 checks: tolerance, never-overwrite rules, a dry run saves nothing, bad input). The real save and revision calls were exercised only by the Taber run.
 
-## Town and Address Connection — DECIDED; MECHANISM BUILT; NOT YET VERIFIED ON REAL DATA
+## Town and Address Connection — DECIDED, BUILT, AND VERIFIED ON BOUNDARY SEARCHES
 
 **Production field facts (read-only inspection):**
 - `field_canadian_towns` (POI and Listing): entity reference to the `canadian_towns` vocabulary, cardinality 1, not required. The node therefore holds ONE term, the town; the province is that term's parent (the vocabulary is one level: province, then town). Example: Taber (type Town, `field_province_code` AB) has the single parent Alberta. Term IDs differ between production and devtop (Taber is 163693 on production, 5733 on devtop).
@@ -534,9 +535,9 @@ Two further rules from this revision:
 - `PoiImportProcessor`: passes `$entry['town_tid']` to the creator and updater.
 - `PoiNodeCreator::create(..., ?int $town_tid = NULL)`: sets `field_canadian_towns` when given.
 - `PoiNodeUpdater::update(..., bool $dry_run = FALSE, ?int $town_tid = NULL)`: fills it only if empty.
-- Sandbox checks (stand-ins) pass; not yet run against real nodes.
+- Sandbox checks (stand-ins) pass, and the change set is verified on real Taber nodes (below).
 
-**OPEN BLOCKER:** devtop's `point_of_interest` type has no `field_canadian_towns` (the Taber dry run after these changes reported 0 updates, as expected). The field's storage already exists on devtop as an entity reference, the same as production's (it is on devtop's Listing; the earlier report that it was a geolocation field was wrong, per the field comparison below). It only needs attaching to POI; no deletion is needed. Not done.
+**RESOLVED:** devtop's `point_of_interest` type had no `field_canadian_towns`, so the first Taber dry run after these changes reported 0 updates. The field comparison showed the storage on devtop was already an entity reference, as on production (the earlier report that it was a geolocation field was wrong), so the field was attached to POI by the field-matching script (see "Devtop vs Production Field Comparison"). **Verified on Taber:** the dry run then listed the 10 existing nodes as `would update ... field_canadian_towns`; the real run connected all 10 to the town Taber; a repeat run reported 0 updated and 10 in sync; reading a node back gave town Taber and province Alberta (the town term's parent). All 10 came from a boundary search; the 15 km circle fallback has not yet been exercised on real data.
 
 **Built, then dropped (recorded so they are not rebuilt):**
 - `PlaceAddress` (town matching by name, province and distance, plus an address-value builder with a Canadian postcode check): dropped. The town matching is unnecessary and unreliable (above), and the address builder is not needed because no node-eligible place has a street. For Listings, businesses do have addresses, so a shared builder with a postcode guard may be worth building then: the Address field requires a postal code once an address is entered, so an address without one would probably block an editor's save.
@@ -650,7 +651,7 @@ Shared infrastructure should eventually include: API client, raw source-file sto
 
 ## Devtop vs Production Field Comparison
 
-A read-only command (type, cardinality, required, and a fingerprint of the storage and field settings) was run on both environments. Display configuration (form and view modes) was not compared. Nothing has been changed yet; the plan is to bring devtop in line by config export and import from production, not by hand-creating fields, after a database backup.
+A read-only command (type, cardinality, required, and a fingerprint of the storage and field settings) was run on both environments. Display configuration (form and view modes) was not compared. Devtop was then brought in line for the 8 field objects below without hand-creating fields: a script with production's configuration (read with a read-only command) built in, run as a dry run first and then applied, after a database backup (saved one level above `public_html`, outside the web root). It never deletes anything, and leaves alone any field storage that exists but is configured differently. The re-check afterwards reported all 8 matching. Objects: storages `field_poi_tags` and `field_meta_description`; instances `field_canadian_towns`, `field_poi_tags` and `field_meta_description` on `point_of_interest`, `field_meta_description` on `listing`, and updated settings for `field_poi_address` and `field_poi_category`. Still different, by decision: the `canadian_towns` term fields (production has over 26,000 terms; devtop is a test set), form and view display settings, and fields that exist only on devtop.
 
 - **`node.point_of_interest`:** devtop is missing `field_canadian_towns`, `field_poi_tags` and `field_meta_description`. `field_poi_address` and `field_poi_category` have the same storage but different field settings (created by hand with defaults). Devtop only: `field_location` (geofield) and the module's `field_source_storage_key`. `field_description`, `field_hero_image` and `field_poi_location` match.
 - **`node.listing`:** devtop is missing `field_meta_description`. Devtop only: `field_final_score`, `field_local_employees`, `field_percent_sourced_locally`, `field_total_employees` and `field_source_storage_key`.
@@ -666,7 +667,7 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 - **Data scan of 1,115 stored places** (257 node-eligible): address and town-by-name findings recorded under "Town and Address Connection".
 - **Repository scan** (commit 085e15d): confirmed address building already existed in both the creator and the updater, that nothing set `field_canadian_towns`, and that the import already knows each place's town.
 - **Production field configuration** for `field_canadian_towns` and the address fields inspected and recorded.
-- **Town-passing change set** (4 files) saved on devtop; sandbox checks pass; real verification blocked by devtop's field mismatch.
+- **Town connection** verified on real Taber nodes (10 connected, repeat run stable, province reachable through the town's parent), and **devtop's POI and Listing fields matched to production's** for the 8 differing objects (re-check: 8 of 8 matching).
 - **Full import pipeline complete end-to-end, at real scale:** `PoiCategoryMapper` (DIRECT mapping, live-tagged taxonomy), `PoiNodeCreator` (create-only, unpublished nodes), `CoordinateTransformer` (verified via actual write), `PoiImportProcessor` (orchestration) — all built, individually verified, and wired into `geoapify:import`. Real current scale: 139 POI nodes created, 1,115 raw places stored, across multiple towns.
 - A real node-creation bug found and fixed: "no usable name" was miscounted as a generic error — now split into its own `no_name` outcome.
 - `field_geoapify_categories`, `field_source_storage_key` added (dev-only stand-ins on devtop) and confirmed working for real mapping/dedup.
@@ -688,7 +689,7 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 
 - **Production field deployment is BUILT but NOT YET APPLIED** — `config/install` YAML + `hook_update_10001()` exist and are verified working on devtop, but production itself has not had this module's fields deployed. This is the real, concrete next step before production use.
 - Cron/queue wiring was never built despite being explicitly requested ("let it work away") — `geoapify:import` still requires manual invocation
-- `field_canadian_towns`: mechanism built (the town is passed from the import to the creator and updater) but NOT verified on real data; blocked by devtop's field mismatch. Changes saved on devtop, not yet committed.
+- `field_canadian_towns`: built and verified on boundary searches; not yet exercised on the circle fallback. The four changed files (`TownImportRunner`, `PoiImportProcessor`, `PoiNodeCreator`, `PoiNodeUpdater`) are saved on devtop; their commit is pending.
 - Cron/queue wiring for unattended operation — `geoapify:import` still requires manual invocation; the spec's original plan for Drupal cron/Queue API integration is unbuilt
 - Whether Anzac/Gregoire are their own `canadian_towns` terms or expected to be covered under Fort McMurray — raised, not checked
 - Whether `field_type` (Locality/Hamlet/Village/Town/City) should skip boundary resolution for `Locality` terms — plausible, not decided or built
@@ -703,8 +704,7 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 - Coordinate tolerance (50 m) tuning against real data at larger scale, especially for large outlines
 - `operator`/`owner` enrichment fields as a possible automated resolver for `needs_review` ownership ambiguity — noted as promising, not built
 - Remaining Drush commands (`geoapify:check-updates`, `geoapify:status`), import status persistence, production deployment of this module
-- **Devtop is missing `field_canadian_towns` on `point_of_interest`.** Attach the existing field (entity reference to `canadian_towns`, cardinality 1) to POI before the town fill can be verified. See "Devtop vs Production Field Comparison".
 - For Listings: a shared address builder with a postcode guard, if Listing creation is built (see "Town and Address Connection").
 - Consolidating the duplicated distance code (`ChangeDetector`, `TownBoundaryResolver`, `PoiNodeUpdater`): discussed, set aside, not scheduled.
 - Latent creator issue: address built from Places data after a reverse-geocode verification (only matters if that setting is on).
-- Commit of the town-passing changes (`TownImportRunner`, `PoiImportProcessor`, `PoiNodeCreator`, `PoiNodeUpdater`) is pending.
+- **Scale on production:** over 26,000 `canadian_towns` terms. One full import pass makes about 40 requests per town (39 category searches plus a one-time boundary lookup), roughly a million requests, which at the default limit of 2,500 per day is more than a year. The project owner has said a slow pass is acceptable, so this is a note, not a requirement. It only determines how often each town's data refreshes (about once per pass) and how long a town late in the loop waits for its first content. Estimated from the code, not measured.
