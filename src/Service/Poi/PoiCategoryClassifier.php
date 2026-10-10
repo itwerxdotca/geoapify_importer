@@ -229,6 +229,13 @@ class PoiCategoryClassifier {
     'production.brewery',
     'production.winery',
     'production.distillery',
+
+    // Natural features: some are real hiking destinations, most are minor
+    // hills and rock outcrops. Category alone cannot tell them apart, so
+    // they are held (not imported) until reviewed — project owner's call.
+    // Waterfalls, caves and viewpoints are NOT held; they map directly.
+    'natural.mountain.peak',
+    'natural.mountain.cliff',
   ];
 
   /**

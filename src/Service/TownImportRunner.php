@@ -91,7 +91,10 @@ class TownImportRunner {
     // natural.mountain/.peak was only 5 of the 200. Narrowed to the
     // specific branches the original spec's mapping table actually named.
     'natural.mountain',
-    'natural.forest',
+    // natural.forest is deliberately NOT searched: forests are not mapped to a
+    // POI Category (mostly minor woodlots), so the request returned places that
+    // could never become nodes. Forests inside a park or reserve are still
+    // found through the park searches below.
     'national_park',
     'leisure.park',
     'leisure.park.garden',

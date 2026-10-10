@@ -67,6 +67,14 @@ services:
     class: Drupal\geoapify_importer\Hook\GeoapifyImporterHooks
     arguments: ['@geoapify_importer.town_queue_manager', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.unmapped_category_report:
+    class: Drupal\geoapify_importer\Service\Poi\UnmappedCategoryReport
+    arguments: ['@geoapify_importer.source_writer', '@geoapify_importer.poi_category_classifier', '@geoapify_importer.poi_category_mapper']
+
+  geoapify_importer.poi_category_tagger:
+    class: Drupal\geoapify_importer\Service\Poi\PoiCategoryTagger
+    arguments: ['@entity_type.manager']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']

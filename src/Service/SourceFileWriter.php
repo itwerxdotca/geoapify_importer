@@ -149,6 +149,44 @@ class SourceFileWriter {
   }
 
   /**
+   * Lists the storage key of every place that has a stored record.
+   *
+   * Read-only, no API calls. A key is the directory name under the places
+   * directory (e.g. osm-w-306707925); it is what readLatest() takes. Only
+   * directories that actually hold a latest.json are returned.
+   *
+   * A generator, so a very large store is walked without holding every key
+   * in memory at once (the directory listing itself is read once).
+   *
+   * @return \Generator<string>
+   */
+  public function listKeys(): \Generator {
+	$dir = $this->placesDirectory();
+	if (!is_dir($dir)) {
+	  return;
+	}
+	$names = scandir($dir);
+	if ($names === FALSE) {
+	  throw new FileException("Failed to list source files in {$dir}.");
+	}
+	foreach ($names as $name) {
+	  if ($name === '.' || $name === '..') {
+		continue;
+	  }
+	  if (is_file($dir . '/' . $name . '/latest.json')) {
+		yield $name;
+	  }
+	}
+  }
+
+  /**
+   * The directory that holds one sub-directory per stored place.
+   */
+  protected function placesDirectory(): string {
+	return self::BASE_URI . '/pois';
+  }
+
+  /**
    * Ensures a directory exists and is writable, creating it if needed.
    *
    * @param string $uri
