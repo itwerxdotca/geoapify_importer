@@ -182,6 +182,20 @@ class PoiCategoryClassifier {
   ];
 
   /**
+   * Branches ignored even though a broader needs-review branch would match.
+   *
+   * Checked after the exceptions and BEFORE NEEDS_REVIEW_BRANCHES (which
+   * otherwise runs ahead of IGNORED_BRANCHES). A camp pitch is one numbered
+   * plot inside a campground, mapped as its own point: not a place, but it
+   * would match the broad 'camping' review branch by prefix.
+   *
+   * @var array<string, string>
+   */
+  protected const IGNORED_BEFORE_REVIEW = [
+    'camping.camp_pitch' => self::REASON_NOT_A_PLACE,
+  ];
+
+  /**
    * Branches that must always go to manual review, never auto-classified.
    *
    * These are known, real categories — the reason they can't be resolved
@@ -237,6 +251,19 @@ class PoiCategoryClassifier {
       foreach (self::IGNORE_EXCEPTIONS as $exception_branch) {
         if ($this->matchesBranch($category, $exception_branch)) {
           return $this->pendingMappingResult();
+        }
+      }
+    }
+
+    foreach ($categories as $category) {
+      foreach (self::IGNORED_BEFORE_REVIEW as $ignored_branch => $reason) {
+        if ($this->matchesBranch($category, $ignored_branch)) {
+          return [
+            'status' => self::STATUS_IGNORED,
+            'reason' => $reason,
+            'matched_branch' => $ignored_branch,
+            'matched_category' => $category,
+          ];
         }
       }
     }

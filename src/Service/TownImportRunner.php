@@ -61,7 +61,10 @@ class TownImportRunner {
     'entertainment.culture.gallery',
     'entertainment.culture.theatre',
     'beach.beach_resort',
-    'camping',
+    // camp_site only. The broad 'camping' search returned up to 200 individual
+    // camp pitches (camping.camp_pitch), filling the cap and crowding out real
+    // campgrounds; pitches are not places.
+    'camping.camp_site',
     'maritime.marina',
     'ski.lift',
     'sport.stadium',
