@@ -4,6 +4,13 @@
 
 **Newest changes (this pass):**
 
+1. **POI detail fields created and filled.** Seven fields (website, phone, email, opening hours, operator, amenities, and the amenity-mapping field) are created by `hook_install` (fresh installs) and `hook_update_10002` (existing sites). A new shared `PlaceInfo` service turns a place's Places properties into clean values; the processor builds the POI field values; the creator sets them on new nodes and the updater fills each only when empty. Verified on devtop: 8 existing nodes updated, 0 errors, each saved as a revision. See "POI Detail Fields".
+2. **No Place Details call is needed for these.** A read-only scan of the stored places showed they already carry website, phone, email, hours, operator and facilities wherever OpenStreetMap has them, so the fields are filled from the stored data at no API cost. `PlaceDetails` exists but nothing calls it for filling.
+3. **Amenities use the existing `poi_amenities` vocabulary**, with a new mapping field listing the Geoapify facility names each term matches. Devtop's Listing `amenities` vocabulary (1,823 junk numbered terms) was cleaned to production's 12.
+4. **Opening hours:** stored as the raw OpenStreetMap string in plain long text on POIs; the Office Hours module (8.x-1.29, enabled on both sites) is for Listings. See "POI Detail Fields".
+
+**Previous pass:**
+
 1. **Node update logic built and verified** (`PoiNodeUpdater`). Existing POI nodes are now brought up to date per the field ownership matrix instead of being skipped. See "Node Updates".
 2. **Town connection decided and partly built.** The node's town is the town the import was searching (boundary first, circle fallback also assigns), decided once in the shared `TownImportRunner` and applied by the creator and updater. See "Town and Address Connection".
 3. **Repository and data scan.** Real counts from devtop showed that name-matching places to town terms resolves only 11% of node-eligible places, and that none of them has a street address. Both are recorded with the numbers.
@@ -130,6 +137,7 @@ geoapify_importer/
 │       ├── GeoapifyRateLimiter.php
 │       ├── PlaceDetails.php
 │       ├── PlaceIdentity.php
+│       ├── PlaceInfo.php
 │       ├── SourceFileWriter.php
 │       ├── TownBoundaryResolver.php
 │       ├── TownImportRunner.php
@@ -554,7 +562,48 @@ Two further rules from this revision:
 - Shared logic belongs in shared infrastructure (`src/Service/`, not `Poi/`) so Listings can reuse it. Decide where logic lives before writing it.
 - Confirm a file is actually in place on the server (`ls`, `php -l`, a `grep -c` for a known string) before testing anything that depends on it.
 
+## POI Detail Fields — BUILT AND VERIFIED
+
+**Fields on `point_of_interest`** (created by `_geoapify_importer_create_detail_fields()`, called from `hook_install` and `hook_update_10002`; idempotent; skipped if the POI type or, for amenities, the `poi_amenities` vocabulary is missing):
+
+| Field | Type | Holds |
+|---|---|---|
+| `field_poi_website` | link (external only, no title) | website |
+| `field_poi_phone` | telephone | phone |
+| `field_poi_email` | email | email |
+| `field_poi_opening_hours` | long plain text | the raw OpenStreetMap hours string |
+| `field_poi_operator` | plain text (255) | who runs the place |
+| `field_poi_amenities` | entity reference to `poi_amenities`, unlimited | amenity terms |
+
+Plus `field_geoapify_facilities` (plain text, unlimited) on the `poi_amenities` terms: the Geoapify facility names that mean a place has that amenity.
+
+**Where the data comes from:** the stored Places records already carry these values wherever OpenStreetMap has them, so no extra API call is made and no Place Details credit is spent. Scan of devtop's stored places:
+- All 1,115 stored places: website 42, phone 18, email 3, opening hours 18, operator 41 (identical whether read from the field or the raw OSM tag), at least one facility 12.
+- The 257 that would become nodes: website 4, phone 1, email 1, opening hours 0, operator 7, facility 1. OpenStreetMap is thin on these for parks.
+- Facility values seen: wheelchair true (9), toilets true (3) and false (2), air conditioning true (2), internet access true (1) and false (1), dogs true (1), and a `wheelchair_details` object (1).
+- All 42 stored websites passed validation.
+
+**`PlaceInfo`** (`src/Service/PlaceInfo.php`, service `geoapify_importer.place_info`, shared so Listings can use it): `fromProperties()` returns only usable values: a website only if it starts with http(s) and validates, the first phone and first valid email of several, the raw hours string, the operator (cut to 255), and the facilities whose value is exactly true. `amenityTermIds()` returns the terms in a vocabulary whose mapping field lists any of those facilities (no term IDs in code; returns nothing if the vocabulary lacks the field).
+
+**Wiring and ownership:** `PoiImportProcessor` (which owns the POI field names) builds a field-name-to-value list and passes it to the creator and updater. `PoiNodeCreator` sets them on a new node. `PoiNodeUpdater` fills each only when the node has that field and it is empty, so an editor's value is never overwritten; it never replaces a managed field. A dry run reports the same fills without saving.
+
+**Amenity mapping (data, per environment):** on devtop, Wheelchair Accessible = `wheelchair`, WiFi = `internet_access`, Pet Friendly = `dogs`. Parking is not a Geoapify facility, so it stays manual. Production's mappings are NOT yet entered.
+
+**Opening hours decision:** Geoapify returns hours as a plain string in OpenStreetMap's own syntax. The Office Hours module (8.x-1.29, enabled on devtop and production, supports Drupal 11) stores structured weekday slots with exceptions, seasons, an open-now indicator and schema.org markup. For POIs that would mean parsing OSM syntax, which can include public holidays and sunrise-based times that weekday slots cannot hold, for data that is almost always absent. So POIs keep the raw string in plain text, and Office Hours is for Listings, where owners enter hours themselves. The Listing Office Hours field is not created yet.
+
+**Verified on devtop:**
+- A dry run on Taber reported 10 nodes in sync (none of Taber's places has details).
+- Sending the 90 stored places that have details through the real processor as a dry run reported 8 existing nodes to update, none to create (24 needs_review, 57 unmapped, 1 ignored).
+- The real run updated those 8 with 0 errors. Brant Park (node 1426) got website, phone and email; Smelt Brook Park (node 1364) got an operator and the Pet Friendly amenity (from the `dogs` facility). Each change is a revision with the log "Updated by Geoapify Importer: <fields>".
+- Data quirk, not a bug: Smelt Brook's operator reads "Twon of Trenton"; that typo is in OpenStreetMap and an editor can correct it (the importer will not overwrite it).
+
+**Vocabularies:** production has `amenities` (Listing Amenities, 12 terms) and `poi_amenities` (POI Amenities, 4 terms: Parking, Pet Friendly, Wheelchair Accessible, WiFi), with no custom fields. Devtop's `poi_amenities` matched; devtop's `amenities` held 1,823 terms with numbers as names, which were removed and replaced with production's 12.
+
+**Not done:** the new fields are not on any form or view display; nothing formats the raw hours string for display; the `PlaceDetails` service (paid Place Details call) is unused by the importer.
+
 ## Production Field Deployment — NEW, BUILT (not yet applied to production)
+
+**Update — what the module creates on install:** the fields it OWNS: `field_source_storage_key` (POI and Listing) and `field_geoapify_categories` (via `config/install`, plus `hook_update_10001` for existing sites), and the seven detail fields (via `hook_install` and `hook_update_10002`). It does NOT create the fields it only DEPENDS ON (`field_poi_location`, `field_poi_address`, `field_poi_category`, `field_canadian_towns`), because they predate it and carry site-specific settings. `hook_requirements()` checks the first three and reports an error if one is missing; **it does not yet check `field_canadian_towns`**, so on a site without it the town would silently not be set. Open decision: whether the install should also create those four when absent (never altering one that exists).
 
 **Two different treatments for two different kinds of fields, deliberately:**
 
@@ -663,6 +712,8 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 
 ### Verified, this stretch (in addition to everything verified previously)
 
+- **POI detail fields** created on devtop by `hook_update_10002`, filled from the stored place data through the real processor on 8 existing nodes with 0 errors and a revision for each (see "POI Detail Fields").
+- Devtop's amenity vocabularies matched to production's.
 - **Node update logic** (`PoiNodeUpdater`) verified on real Taber data: location re-synced only past 50 m, category filled only when empty, an editor's title preserved, every change saved as a revision, a repeat run reporting 0 updates, and dry run reporting exactly what a real run does.
 - **Data scan of 1,115 stored places** (257 node-eligible): address and town-by-name findings recorded under "Town and Address Connection".
 - **Repository scan** (commit 085e15d): confirmed address building already existed in both the creator and the updater, that nothing set `field_canadian_towns`, and that the import already knows each place's town.
@@ -708,3 +759,7 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 - Consolidating the duplicated distance code (`ChangeDetector`, `TownBoundaryResolver`, `PoiNodeUpdater`): discussed, set aside, not scheduled.
 - Latent creator issue: address built from Places data after a reverse-geocode verification (only matters if that setting is on).
 - **Scale on production:** over 26,000 `canadian_towns` terms. One full import pass makes about 40 requests per town (39 category searches plus a one-time boundary lookup), roughly a million requests, which at the default limit of 2,500 per day is more than a year. The project owner has said a slow pass is acceptable, so this is a note, not a requirement. It only determines how often each town's data refreshes (about once per pass) and how long a town late in the loop waits for its first content. Estimated from the code, not measured.
+- **Production:** enter the amenity mappings on the `poi_amenities` terms (`field_geoapify_facilities`); add the new fields to the POI form and view displays; Parking has no Geoapify facility.
+- **Install check gap:** `field_canadian_towns` is not in `hook_requirements()`. Decide whether the install should create missing dependency fields.
+- Listing: Office Hours field not created; no Listing detail wiring.
+- Commit of the detail-fields work (`PlaceInfo`, the install file, the processor, creator and updater) is pending.
