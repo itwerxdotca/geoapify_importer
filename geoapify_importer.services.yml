@@ -59,6 +59,14 @@ services:
     class: Drupal\geoapify_importer\Service\PlaceInfo
     arguments: ['@entity_type.manager']
 
+  geoapify_importer.town_queue_manager:
+    class: Drupal\geoapify_importer\Service\TownQueueManager
+    arguments: ['@queue', '@keyvalue', '@entity_type.manager', '@geoapify_importer.town_import_runner', '@geoapify_importer.rate_limiter', '@config.factory', '@datetime.time', '@logger.channel.geoapify_importer']
+
+  Drupal\geoapify_importer\Hook\GeoapifyImporterHooks:
+    class: Drupal\geoapify_importer\Hook\GeoapifyImporterHooks
+    arguments: ['@geoapify_importer.town_queue_manager', '@logger.channel.geoapify_importer']
+
   logger.channel.geoapify_importer:
     parent: logger.channel_base
     arguments: ['geoapify_importer']

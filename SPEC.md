@@ -341,6 +341,7 @@ Running the new `geoapify:fetch` Drush command (see below) against a 15km radius
   - Default: a commercial category is `ignored` (reason `commercial`), destined for the Listing content type, not POI.
   - Explicit exceptions — POI-eligible regardless of commercial activity, achieved simply by never appearing in any ignore list: historic/heritage sites, government buildings (`office.government.*`), hospitals (`healthcare.hospital`), police (`service.police`), fire stations (`service.fire_station`), tourism info centres (`tourism.information.*`), cemeteries (`memorial.cemetery`, `.graveyard`). `office.government.*` and `service.police`/`.fire_station` needed an explicit `IGNORE_EXCEPTIONS` carve-out, checked first, because they sit under otherwise-ignored parents (`office`, `service`).
   - Always `needs_review`, confirmed by the project owner: `entertainment.museum`, `.zoo`, `.aquarium`, `.theme_park`, `.culture.arts_centre`, `.culture.gallery`, `.culture.theatre` (classic attractions that also charge admission — ownership determines the real answer); `beach.beach_resort`, `camping`, `maritime.marina`, `ski.lift`, `sport.stadium`, `sport.golf_course`, `production.brewery`/`.winery`/`.distillery` (gray-area group, explicitly left for manual, case-by-case review rather than a blanket rule).
+  - **Camping search narrowed, verified on production (Taber / Plage-Taber).** The search asked for the broad `camping` branch, which returned the 200-result cap made up almost entirely of `camping.camp_pitch` (individual numbered plots inside a campground, not places): 193 of the 205 needs_review places were pitches, and real campgrounds were crowded out. The search now asks for `camping.camp_site` only, and the classifier ignores `camping.camp_pitch` as not a place (checked before the needs_review rule, which would otherwise match it by prefix). After the change Plage-Taber returned 162 places (was 205 reported, with the cap warning), 30 in sync, 13 needs_review, and the truncation warning was gone. `camping.caravan_site` and `camping.summer_camp` are no longer searched; they were only ever held for review, so no nodes are affected. Add `camping.caravan_site` only after confirming the name against Geoapify's live list: a wrong name makes Geoapify reject the request for every town.
   - Private medical/dental clinics and pharmacies (`healthcare.clinic_or_praxis`, `.dentist`, `.pharmacy`) confirmed `ignored` (commercial) — unlike hospitals, these are private commercial practices.
 - **Real bug found and fixed:** the ignore list originally included a blanket `building` entry. Geoapify tags many places with a generic `building.*` category ALONGSIDE their specific one (e.g. a museum carries both `building.tourism` and `entertainment.museum`; a church carries `building.place_of_worship` and `religion.place_of_worship.*`). Because `building` is a parent of children like `building.healthcare`, `building.historic`, `building.place_of_worship`, and `building.public_and_civil`, the blanket rule would have silently ignored real POI candidates whenever the generic tag was checked before the specific one — including hospitals, churches, historic sites, and government buildings, none of which are on any ignore list. Found via real data (Oil Sands Discovery Centre carries `building.tourism`) and only avoided by luck of matching order. Removed entirely rather than narrowed, since every genuine commercial `building.*` case already matches independently via its own specific category.
 - **PROVENANCE:** most of this table was built from the full 833-category list plus this policy discussion, not from categories actually seen in fetched data — unlike the original single artwork entry. Treat as a first, reviewable pass; expand/correct as real data turns up mismatches.
@@ -471,9 +472,36 @@ A 5GB Canada-wide POI dataset (`anythingpoi_canada_v0.1`, Zenodo, DOI 10.5281/ze
 - **Live-tested at `limit=20`** (returned 7 real features — see Classification Engine discovery above).
 - **Default `categories=entertainment,tourism` is suspect** because of the multi-category open item under "Places API".
 
+## Scheduled Import (Cron and Queue) — BUILT; logic tested outside Drupal, NOT YET RUN IN DRUPAL
+
+Unattended operation, using the Drupal Queue API and cron. It does exactly what `drush geoapify:import --town=...` does for one town (`TownImportRunner::importTown()` then `PoiImportProcessor::process()`), so a scheduled run and a manual run cannot drift apart. Drupal's Batch API was deliberately not used: it is built for a person watching a browser progress bar, and this runs unattended over months.
+
+**Why a queue.** One full pass is over 26,000 towns at about 42 requests each (39 category searches plus up to 3 for a first-time boundary lookup). At the default limit of 2,500 requests a day that is about 60 towns a day, so a pass takes more than a year. A queue that resumes where it stopped and pauses when the day's budget is spent suits that; a long-running command does not.
+
+**Pieces (all in the module):**
+- `TownQueueManager` (service `geoapify_importer.town_queue_manager`): chooses and queues towns, records how each went, reports status.
+- `TownImportWorker` (queue worker plugin, queue name `geoapify_importer_town`, attribute-discovered, `cron: time 120`): imports one town per item.
+- `GeoapifyImporterHooks` (`src/Hook/`, `#[Hook('cron')]`): tops the queue up. Core runs hook_cron before it works the queues (verified in the 11.2 source), so a fill is processed in the same cron run.
+- Drush: `geoapify:queue-towns` (options `--limit`, `--town`, `--force`) and `geoapify:queue-status`. Draining by hand uses core's `drush queue:run geoapify_importer_town`.
+- Setting `scheduled_import_enabled` on the settings form. **Default OFF**, so installing or updating can never start spending API credits by itself.
+
+**Selection order.** Towns never imported successfully first (never tried before previously failed), then the towns imported longest ago. A town counts as up to date for 90 days after a successful import (hardcoded constant). There is no population or importance field on `canadian_towns`; if one is added, `enqueueDue()` is the one place to rank by it.
+
+**State** is in the key-value store (collection `geoapify_importer.towns`, one small record per town id), not a custom SQL table: `last_success`, `last_attempt`, `queued`, `failures`, `not_importable`, and the last run's counts. A town only gets `last_success` when every category request succeeded; a town with failed requests stays due. A `queued` mark stops double-queuing and is ignored after 3 days so a queue emptied by hand does not leave towns stuck. Terms without coordinates (province-level parents) are flagged `not_importable` once so they are not reloaded on every fill.
+
+**Budget.** Before each town the worker checks that today's remaining requests cover a whole town (`categories + 3`). If not it throws `SuspendQueueException`: Drupal releases the item untouched and stops working this queue for this cron run; work resumes after midnight UTC when the counter resets. The rate limiter remains the hard stop. Address look-ups for new nodes (if reverse-geocode verification is on) and any use of the key outside the importer are not counted in the estimate, so a town can still hit the limit part way; its failed category requests are counted and it is retried later, not marked done. When the limit is switched off the budget check always passes.
+
+**Failure handling.** Drupal leaves an item whose worker threw an ordinary exception in the queue to be retried on every cron run (verified in the 11.2 source), so one bad town would be hit again and again. The worker therefore catches town-level failures itself, logs them, records a failure, and drops the item; a later fill queues the town again.
+
+**Cron frequency matters.** A town takes tens of seconds, so one cron run handles a handful of towns. Using the daily budget needs cron every 5-15 minutes (system crontab running `drush cron`).
+
+**Requirement change.** `core_version_requirement` is now `^11.2 || ^12`: the queue worker attribute and hook classes need 11.2 or later (devtop runs 11.2.14, production 11.4.7).
+
+**Verification status, stated plainly.** 37 checks passed with hand-written fakes outside Drupal (ordering, duplicates, stale marks, `--force`, name filter, result recording, budget edge cases, status counts, worker success/skip/failure paths, the attribute's queue name, the cron hook's four conditions). Not yet verified: service container wiring, queue worker plugin discovery, hook registration, the entity query (`name CONTAINS`) and key-value behaviour on a live Drupal, and an end-to-end cron run. Those need the checks listed in the hand-over notes on devtop first.
+
 ## Ingestion / Synchronization Design (mostly unchanged — not yet implemented)
 
-- Not yet built: Drupal cron / Queue API wiring (unattended operation), `geoapify:check-updates`, `geoapify:status`, pagination, review workflows. Built: change detection, node-level duplicate detection, global rate limiting, `geoapify:import`.
+- Not yet built: `geoapify:check-updates`, pagination, review workflows. Built: change detection, node-level duplicate detection, global rate limiting, `geoapify:import`, and the cron/queue wiring (see "Scheduled Import"; status is reported by `geoapify:queue-status`).
 - `geoapify:fetch` (above) is a new, real, narrower precursor to `geoapify:import` — not a replacement for it.
 
 ## Record Identity / Duplicate Detection — CORRECTED
@@ -736,12 +764,14 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 - `ChangeDetector` built and verified (new/unchanged/changed; 50 m coordinate tolerance, verified necessary via a real false-positive)
 - Two real devtop environment bugs found and fixed: PHP CLI resolving to 8.3.33 despite Herd's global 8.4 setting (fixed via `herd use 8.4`); `field_poi_address`'s database table missing a column vs. the installed Address module's schema (fixed via direct `ALTER TABLE`)
 
+- **Production, Taber:** module deployed from GitHub, updates 10001 and 10002 applied, 13 category mappings set; Taber import created 40 nodes (11 Taber, 29 Plage-Taber), 0 errors, repeat run stable. Camping fix deployed and re-run: Plage-Taber 30 in sync, 13 needs_review, no truncation warning; the circle fallback was exercised on real production data for the first time (Plage-Taber boundary match confidence 0) and worked, with the nodes connected to the town.
+- **Production `field_poi_address`** was missing the `address_line3` column (same fault as devtop earlier); fixed with `addField()`.
+
 ### Not yet implemented / not yet resolved
 
 - **Production field deployment is BUILT but NOT YET APPLIED** — `config/install` YAML + `hook_update_10001()` exist and are verified working on devtop, but production itself has not had this module's fields deployed. This is the real, concrete next step before production use.
-- Cron/queue wiring was never built despite being explicitly requested ("let it work away") — `geoapify:import` still requires manual invocation
 - `field_canadian_towns`: built and verified on boundary searches; not yet exercised on the circle fallback. The four changed files (`TownImportRunner`, `PoiImportProcessor`, `PoiNodeCreator`, `PoiNodeUpdater`) are saved on devtop; their commit is pending.
-- Cron/queue wiring for unattended operation — `geoapify:import` still requires manual invocation; the spec's original plan for Drupal cron/Queue API integration is unbuilt
+- **Scheduled import is built but has not run in Drupal.** Verify on devtop, then deploy to production and switch `scheduled_import_enabled` on only when ready (see "Scheduled Import").
 - Whether Anzac/Gregoire are their own `canadian_towns` terms or expected to be covered under Fort McMurray — raised, not checked
 - Whether `field_type` (Locality/Hamlet/Village/Town/City) should skip boundary resolution for `Locality` terms — plausible, not decided or built
 - Whether/how a POI can be "upgraded" to a Listing (Option 1 vs. Option 2 from the business-model discussion) — not finalized, not built
@@ -754,7 +784,7 @@ A read-only command (type, cardinality, required, and a fingerprint of the stora
 - Fallback duplicate detection (coordinates; normalized name plus context) for OSM objects that are recreated with a new ID
 - Coordinate tolerance (50 m) tuning against real data at larger scale, especially for large outlines
 - `operator`/`owner` enrichment fields as a possible automated resolver for `needs_review` ownership ambiguity — noted as promising, not built
-- Remaining Drush commands (`geoapify:check-updates`, `geoapify:status`), import status persistence, production deployment of this module
+- Remaining Drush command `geoapify:check-updates`; per-place import status persistence (per-town state is now kept by the queue)
 - For Listings: a shared address builder with a postcode guard, if Listing creation is built (see "Town and Address Connection").
 - Consolidating the duplicated distance code (`ChangeDetector`, `TownBoundaryResolver`, `PoiNodeUpdater`): discussed, set aside, not scheduled.
 - Latent creator issue: address built from Places data after a reverse-geocode verification (only matters if that setting is on).

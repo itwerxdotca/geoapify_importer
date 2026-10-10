@@ -160,16 +160,26 @@ class TownImportRunner {
 
     $importable = [];
     foreach ($terms as $tid => $term) {
-      if (!$term->hasField('field_geolocation')) {
-        continue;
-      }
-      $value = $term->get('field_geolocation')->getValue();
-      if (!empty($value) && isset($value[0]['lat'], $value[0]['lng'])) {
+      if ($this->isImportable($term)) {
         $importable[$tid] = $term;
       }
     }
 
     return $importable;
+  }
+
+  /**
+   * Whether a canadian_towns term has the coordinates an import needs.
+   *
+   * Shared by loadImportableTowns() and the queue, so both agree on what an
+   * importable town is.
+   */
+  public function isImportable(\Drupal\taxonomy\TermInterface $term): bool {
+    if (!$term->hasField('field_geolocation')) {
+      return FALSE;
+    }
+    $value = $term->get('field_geolocation')->getValue();
+    return !empty($value) && isset($value[0]['lat'], $value[0]['lng']);
   }
 
   /**

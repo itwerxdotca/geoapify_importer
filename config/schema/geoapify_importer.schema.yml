@@ -17,3 +17,6 @@ geoapify_importer.settings:
     place_details_enabled:
       type: boolean
       label: 'Enable Place Details enrichment'
+    scheduled_import_enabled:
+      type: boolean
+      label: 'Run the town import automatically on cron'

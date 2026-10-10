@@ -129,6 +129,21 @@ class GeoapifyImporterSettingsForm extends ConfigFormBase {
     ],
   ];
 
+  $form['scheduled'] = [
+    '#type' => 'details',
+    '#title' => $this->t('Scheduled import'),
+    '#open' => TRUE,
+  ];
+
+  $form['scheduled']['scheduled_import_enabled'] = [
+    '#type' => 'checkbox',
+    '#title' => $this->t('Import towns automatically on cron'),
+    '#default_value' => $config->get('scheduled_import_enabled') ?? FALSE,
+    '#description' => $this->t(
+    'When enabled, cron keeps a queue of towns topped up and imports them one at a time: towns never imported first, then the ones imported longest ago. Work pauses when the daily request limit above leaves no room for another town, and carries on after midnight UTC. Importing one town takes about 40 requests, so the default limit covers roughly 60 towns a day. Leave disabled to run imports only by hand with drush. Cron needs to run often (every 5-15 minutes) for this to use the daily budget.'
+    ),
+  ];
+
   $form['place_details'] = [
     '#type' => 'details',
     '#title' => $this->t('Place Details enrichment'),
@@ -163,6 +178,7 @@ class GeoapifyImporterSettingsForm extends ConfigFormBase {
     ->set('geoapify_rate_limit_enabled', (bool) $form_state->getValue('geoapify_rate_limit_enabled'))
     ->set('geoapify_daily_request_limit', (int) $form_state->getValue('geoapify_daily_request_limit'))
     ->set('place_details_enabled', (bool) $form_state->getValue('place_details_enabled'))
+    ->set('scheduled_import_enabled', (bool) $form_state->getValue('scheduled_import_enabled'))
     ->save();
 
   parent::submitForm($form, $form_state);
