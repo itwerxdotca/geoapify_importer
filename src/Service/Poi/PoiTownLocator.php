@@ -3,6 +3,7 @@
 namespace Drupal\geoapify_importer\Service\Poi;
 
 use Drupal\Core\Database\Connection;
+use Drupal\geoapify_importer\Service\CsdBoundaryLocator;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -47,9 +48,29 @@ class PoiTownLocator {
    */
   protected const MAX_NAME_DISTANCE = 30000.0;
 
+  /**
+   * Furthest a City term may be from its place: amalgamated cities such as
+   * Ottawa (2,800 km2) have places 40+ km from the term's coordinates.
+   */
+  protected const MAX_CITY_DISTANCE = 100000.0;
+
+  /**
+   * Statistics Canada subdivision types that are a city, town or village in
+   * their own right (C city, CV/CY city, T/TV town, V ville, VL village).
+   * Everything else (municipality, township, regional district area, reserve,
+   * county subdivision...) is an area that may contain named villages.
+   */
+  protected const CITY_LIKE = ['C', 'CV', 'CY', 'T', 'TV', 'V', 'VL'];
+
+  /**
+   * Furthest a village/hamlet term may be from the place, inside the same municipality.
+   */
+  protected const MAX_INSIDE_DISTANCE = 150000.0;
+
   public function __construct(
     protected Connection $database,
     protected LoggerInterface $logger,
+    protected ?CsdBoundaryLocator $boundaries = NULL,
   ) {}
 
   /**
@@ -70,8 +91,181 @@ class PoiTownLocator {
     if (!is_array($coordinates) || count($coordinates) < 2) {
       return $searched_tid;
     }
-    $match = $this->matchByName($feature['properties'] ?? [], (float) $coordinates[1], (float) $coordinates[0]);
-    return $match ?? $searched_tid;
+    $properties = $feature['properties'] ?? [];
+    $lat = (float) $coordinates[1];
+    $lng = (float) $coordinates[0];
+    $resolved = $this->resolveByBoundary($properties, $lat, $lng);
+    if ($resolved !== NULL) {
+      return $resolved['tid'];
+    }
+    $match = $this->matchByName($properties, $lat, $lng);
+    if ($match !== NULL) {
+      return $match;
+    }
+    // No name matched. The searched town stands, unless it is in a different
+    // province from the place itself (a circle search crosses a provincial
+    // border, e.g. Ottawa and Gatineau): then the nearest town in the
+    // place's own province is used.
+    if ($this->isWrongProvince($searched_tid, $properties)) {
+      return $this->nearestInProvince($lat, $lng, (string) $properties['state_code'])['tid'] ?? $searched_tid;
+    }
+    return $searched_tid;
+  }
+
+
+  /**
+   * The town for a point, by the official municipal boundaries.
+   *
+   * Finds the census subdivision (municipality) the point is inside, then:
+   *  1. a city, town or village municipality: its own town term;
+   *  2. otherwise (a township, regional district area, rural municipality...)
+   *     the town, village or hamlet the place's address names, if that term is
+   *     itself inside the same municipality;
+   *  3. otherwise the municipality's own term, if the vocabulary has one;
+   *  4. otherwise the address suburb, if inside the municipality;
+   *  5. otherwise the nearest town term inside the municipality.
+   * Province and municipality come from the boundary file, not the address.
+   *
+   * @return array{tid: int, how: string, municipality: string}|null
+   *   NULL when the boundary files are not installed, the point is inside no
+   *   municipality, or no town term fits; the caller then falls back to
+   *   matchByName().
+   */
+  public function resolveByBoundary(array $properties, float $lat, float $lng): ?array {
+    if ($this->boundaries === NULL || !$this->boundaries->isAvailable()) {
+      return NULL;
+    }
+    $csd = $this->boundaries->find($lat, $lng);
+    if ($csd === NULL) {
+      return NULL;
+    }
+    $in = ['state_code' => $csd['province']];
+    $municipality = $this->findTerm($this->cleanMunicipalityName($csd['name']), $in, $lat, $lng);
+    if ($municipality !== NULL && in_array($csd['type'], self::CITY_LIKE, TRUE)) {
+      return ['tid' => $municipality, 'how' => 'municipality', 'municipality' => $csd['name']];
+    }
+    foreach ($this->specificNames($properties) as $name) {
+      if (($tid = $this->findTermInside($name, $csd, $lat, $lng)) !== NULL) {
+        return ['tid' => $tid, 'how' => 'named village inside the municipality', 'municipality' => $csd['name']];
+      }
+    }
+    if ($municipality !== NULL) {
+      return ['tid' => $municipality, 'how' => 'municipality', 'municipality' => $csd['name']];
+    }
+    foreach ($this->suburbNames($properties) as $name) {
+      if (($tid = $this->findTermInside($name, $csd, $lat, $lng)) !== NULL) {
+        return ['tid' => $tid, 'how' => 'suburb inside the municipality', 'municipality' => $csd['name']];
+      }
+    }
+    $nearest = $this->nearestInside($csd, $lat, $lng);
+    return $nearest === NULL ? NULL : ['tid' => $nearest, 'how' => 'nearest town inside the municipality', 'municipality' => $csd['name']];
+  }
+
+  /**
+   * The best town for a point: boundary first, then the address names.
+   *
+   * @return array{tid: int, how: string}|null
+   */
+  public function resolveTown(array $properties, float $lat, float $lng): ?array {
+    $resolved = $this->resolveByBoundary($properties, $lat, $lng);
+    if ($resolved !== NULL) {
+      return $resolved;
+    }
+    $match = $this->matchByName($properties, $lat, $lng);
+    return $match === NULL ? NULL : ['tid' => $match, 'how' => 'address name'];
+  }
+
+  /**
+   * "Lloydminster (Part)" is "Lloydminster".
+   */
+  protected function cleanMunicipalityName(string $name): string {
+    return trim(preg_replace('/\s*\([^)]*\)\s*$/u', '', $name));
+  }
+
+  /**
+   * The closest term with this name whose coordinates are inside the municipality.
+   */
+  protected function findTermInside(string $name, array $csd, float $lat, float $lng): ?int {
+    $best = NULL;
+    foreach ($this->nameIndex()[$this->normalise($name)] ?? [] as [$tid, $t_lat, $t_lng, $t_prov]) {
+      if ($t_prov !== '' && $t_prov !== $csd['province']) {
+        continue;
+      }
+      $distance = $this->distance($lat, $lng, $t_lat, $t_lng);
+      if ($distance > self::MAX_INSIDE_DISTANCE || ($best !== NULL && $distance >= $best[1])) {
+        continue;
+      }
+      $at = $this->boundaries->find($t_lat, $t_lng);
+      if ($at !== NULL && $at['uid'] === $csd['uid']) {
+        $best = [$tid, $distance];
+      }
+    }
+    return $best[0] ?? NULL;
+  }
+
+  /**
+   * The nearest town term that lies inside the municipality, or NULL.
+   */
+  protected function nearestInside(array $csd, float $lat, float $lng): ?int {
+    $candidates = [];
+    foreach ($this->index() as $tid => $row) {
+      if (strtoupper((string) ($row[3] ?? '')) !== $csd['province'] || abs($row[0] - $lat) > 1.0) {
+        continue;
+      }
+      $candidates[(int) $tid] = $this->distance($lat, $lng, $row[0], $row[1]);
+    }
+    asort($candidates);
+    $tries = 0;
+    foreach ($candidates as $tid => $distance) {
+      if ($distance > self::MAX_INSIDE_DISTANCE || ++$tries > 400) {
+        break;
+      }
+      $row = $this->index()[$tid];
+      $at = $this->boundaries->find($row[0], $row[1]);
+      if ($at !== NULL && $at['uid'] === $csd['uid']) {
+        return $tid;
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * The province code of a town term, or '' if unknown.
+   */
+  public function provinceOf(int $tid): string {
+    return strtoupper((string) ($this->index()[$tid][3] ?? ''));
+  }
+
+  /**
+   * True when the town is known to be in a different province from the place.
+   */
+  public function isWrongProvince(?int $tid, array $properties): bool {
+    $place = strtoupper((string) ($properties['state_code'] ?? ''));
+    $town = $tid === NULL ? '' : $this->provinceOf($tid);
+    return $place !== '' && $town !== '' && $place !== $town;
+  }
+
+  /**
+   * The nearest town whose province code is the given one.
+   *
+   * @return array{tid: int, distance: float}|null
+   */
+  public function nearestInProvince(float $lat, float $lng, string $province): ?array {
+    $best = NULL;
+    $province = strtoupper($province);
+    foreach ($this->index() as $tid => $row) {
+      if (strtoupper((string) ($row[3] ?? '')) !== $province) {
+        continue;
+      }
+      if ($best !== NULL && abs($row[0] - $lat) * 110000.0 > $best['distance']) {
+        continue;
+      }
+      $distance = $this->distance($lat, $lng, $row[0], $row[1]);
+      if ($best === NULL || $distance < $best['distance']) {
+        $best = ['tid' => (int) $tid, 'distance' => $distance];
+      }
+    }
+    return $best;
   }
 
   /**
@@ -174,7 +368,8 @@ class PoiTownLocator {
       if ($province !== '' && $t_prov !== '' && $t_prov !== $province && $distance > 10000.0) {
         continue;
       }
-      if ($distance <= self::MAX_NAME_DISTANCE && ($best === NULL || $distance < $best[1])) {
+      $limit = $t_type === 'City' ? self::MAX_CITY_DISTANCE : self::MAX_NAME_DISTANCE;
+      if ($distance <= $limit && ($best === NULL || $distance < $best[1])) {
         $best = [$tid, $distance];
       }
     }

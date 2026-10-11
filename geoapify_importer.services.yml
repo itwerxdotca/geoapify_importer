@@ -35,9 +35,13 @@ services:
     class: Drupal\geoapify_importer\Service\Poi\PoiCategoryMapper
     arguments: ['@entity_type.manager', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.csd_boundary_locator:
+    class: Drupal\geoapify_importer\Service\CsdBoundaryLocator
+    arguments: ['@file_system', '@logger.channel.geoapify_importer']
+
   geoapify_importer.poi_town_locator:
     class: Drupal\geoapify_importer\Service\Poi\PoiTownLocator
-    arguments: ['@database', '@logger.channel.geoapify_importer']
+    arguments: ['@database', '@logger.channel.geoapify_importer', '@geoapify_importer.csd_boundary_locator']
 
   geoapify_importer.poi_node_creator:
     class: Drupal\geoapify_importer\Service\Poi\PoiNodeCreator
