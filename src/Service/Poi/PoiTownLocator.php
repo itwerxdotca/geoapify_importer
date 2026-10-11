@@ -94,7 +94,7 @@ class PoiTownLocator {
     $properties = $feature['properties'] ?? [];
     $lat = (float) $coordinates[1];
     $lng = (float) $coordinates[0];
-    $resolved = $this->resolveByBoundary($properties, $lat, $lng);
+    $resolved = $this->resolveByBoundary($properties, $lat, $lng, $searched_tid);
     if ($resolved !== NULL) {
       return $resolved['tid'];
     }
@@ -123,7 +123,9 @@ class PoiTownLocator {
    *     itself inside the same municipality;
    *  3. otherwise the municipality's own term, if the vocabulary has one;
    *  4. otherwise the address suburb, if inside the municipality;
-   *  5. otherwise the nearest town term inside the municipality.
+   *  5. otherwise the town $keep (the town the place already has or was
+   *     searched under), if that term is inside the municipality;
+   *  6. otherwise the nearest town term inside the municipality.
    * Province and municipality come from the boundary file, not the address.
    *
    * @return array{tid: int, how: string, municipality: string}|null
@@ -131,7 +133,7 @@ class PoiTownLocator {
    *   municipality, or no town term fits; the caller then falls back to
    *   matchByName().
    */
-  public function resolveByBoundary(array $properties, float $lat, float $lng): ?array {
+  public function resolveByBoundary(array $properties, float $lat, float $lng, ?int $keep = NULL): ?array {
     if ($this->boundaries === NULL || !$this->boundaries->isAvailable()) {
       return NULL;
     }
@@ -157,6 +159,12 @@ class PoiTownLocator {
         return ['tid' => $tid, 'how' => 'suburb inside the municipality', 'municipality' => $csd['name']];
       }
     }
+    if ($keep !== NULL && ($row = $this->index()[$keep] ?? NULL) !== NULL) {
+      $at = $this->boundaries->find($row[0], $row[1]);
+      if ($at !== NULL && $at['uid'] === $csd['uid']) {
+        return ['tid' => $keep, 'how' => 'current town is inside the municipality', 'municipality' => $csd['name']];
+      }
+    }
     $nearest = $this->nearestInside($csd, $lat, $lng);
     return $nearest === NULL ? NULL : ['tid' => $nearest, 'how' => 'nearest town inside the municipality', 'municipality' => $csd['name']];
   }
@@ -166,8 +174,8 @@ class PoiTownLocator {
    *
    * @return array{tid: int, how: string}|null
    */
-  public function resolveTown(array $properties, float $lat, float $lng): ?array {
-    $resolved = $this->resolveByBoundary($properties, $lat, $lng);
+  public function resolveTown(array $properties, float $lat, float $lng, ?int $keep = NULL): ?array {
+    $resolved = $this->resolveByBoundary($properties, $lat, $lng, $keep);
     if ($resolved !== NULL) {
       return $resolved;
     }
