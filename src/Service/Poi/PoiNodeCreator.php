@@ -111,12 +111,18 @@ class PoiNodeCreator {
     $address_verification = $this->addressVerifier->verify($properties);
     $address_verified = $address_verification['status'] === AddressVerifier::STATUS_VERIFIED;
 
-    if ($address_verified) {
-      $values['field_poi_address'] = [
+    // Street (and house number if any) plus postal code from the Places data.
+    $address = AddressVerifier::placesAddress($properties);
+    if ($address === NULL && $address_verified) {
+      // Verified another way (reverse geocode, if enabled): keep that value.
+      $address = [
         'country_code' => 'CA',
         'address_line1' => $properties['housenumber'] . ' ' . $properties['street'],
         'postal_code' => $properties['postcode'] ?? NULL,
       ];
+    }
+    if ($address !== NULL) {
+      $values['field_poi_address'] = $address;
     }
 
     try {
@@ -138,7 +144,7 @@ class PoiNodeCreator {
     return [
       'status' => 'created',
       'nid' => (int) $node->id(),
-      'address_verified' => $address_verified,
+      'address_verified' => $address !== NULL,
     ];
   }
 

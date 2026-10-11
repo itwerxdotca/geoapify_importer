@@ -24,8 +24,8 @@ use Psr\Log\LoggerInterface;
  *   empty. A value already on the node — especially one an editor chose —
  *   is never overwritten, even if the mapper would now pick differently.
  * - field_poi_address: SOURCE_ASSISTED_REVIEW. Filled ONLY if currently
- *   empty, and only when the Places data itself carries a housenumber and
- *   street. Deliberately does NOT use AddressVerifier's reverse-geocode
+ *   empty, and only when the Places data itself carries a street and a valid
+ *   Canadian postal code (house number optional). Deliberately does NOT use AddressVerifier's reverse-geocode
  *   fallback: on an update run that would re-spend a metered API call, on
  *   every run, for every place that has no address and never will (most
  *   parks). The fallback still applies at creation time.
@@ -218,26 +218,16 @@ class PoiNodeUpdater {
   /**
    * Address value to fill in, or NULL.
    *
-   * Only when the node's address is empty AND the Places data itself has
-   * both a housenumber and a street (the same rule AddressVerifier applies
-   * first, without its metered reverse-geocode fallback).
+   * Only when the node's address is empty AND the Places data itself has a
+   * street and a valid Canadian postal code (house number optional; see
+   * AddressVerifier::placesAddress). No metered reverse-geocode call.
    */
   protected function addressChange(object $node, array $properties): ?array {
     if (!$node->hasField('field_poi_address') || !$node->get('field_poi_address')->isEmpty()) {
       return NULL;
     }
 
-    $housenumber = $properties['housenumber'] ?? NULL;
-    $street = $properties['street'] ?? NULL;
-    if (empty($housenumber) || empty($street)) {
-      return NULL;
-    }
-
-    return [
-      'country_code' => 'CA',
-      'address_line1' => $housenumber . ' ' . $street,
-      'postal_code' => $properties['postcode'] ?? NULL,
-    ];
+    return \Drupal\geoapify_importer\Service\AddressVerifier::placesAddress($properties);
   }
 
   /**
