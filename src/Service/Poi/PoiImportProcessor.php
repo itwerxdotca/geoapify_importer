@@ -39,6 +39,7 @@ class PoiImportProcessor {
     protected PoiNodeUpdater $updater,
     protected PlaceInfo $placeInfo,
     protected LoggerInterface $logger,
+    protected PoiTownLocator $townLocator,
   ) {}
 
   /**
@@ -143,12 +144,16 @@ class PoiImportProcessor {
 
       $field_values = $this->detailFieldValues($entry['feature']['properties'] ?? []);
 
+      // The town: the searched town for a boundary search, the nearest town
+      // for a circle search (see PoiTownLocator).
+      $town_tid = $this->townLocator->townFor($entry['feature'], $entry['town_tid'] ?? NULL, $entry['search_method'] ?? NULL);
+
       // Existing node: update it. Works the same in a dry run — the updater
       // is told not to save, so the report matches what a real run does.
       $existing_nid = $this->creator->findExistingNodeId($entry['key']);
       if ($existing_nid !== NULL) {
         try {
-          $result = $this->updater->update($existing_nid, $entry['feature'], $mapped['term'], $dry_run, $entry['town_tid'] ?? NULL, $field_values);
+          $result = $this->updater->update($existing_nid, $entry['feature'], $mapped['term'], $dry_run, $town_tid, $field_values);
         }
         catch (\Throwable $e) {
           $counts['errors']++;
@@ -193,7 +198,7 @@ class PoiImportProcessor {
       }
 
       try {
-        $result = $this->creator->create($entry['key'], $entry['feature'], $mapped['term'], $entry['town_tid'] ?? NULL, $field_values);
+        $result = $this->creator->create($entry['key'], $entry['feature'], $mapped['term'], $town_tid, $field_values);
       }
       catch (\Throwable $e) {
         $counts['errors']++;

@@ -35,13 +35,17 @@ services:
     class: Drupal\geoapify_importer\Service\Poi\PoiCategoryMapper
     arguments: ['@entity_type.manager', '@logger.channel.geoapify_importer']
 
+  geoapify_importer.poi_town_locator:
+    class: Drupal\geoapify_importer\Service\Poi\PoiTownLocator
+    arguments: ['@database', '@logger.channel.geoapify_importer']
+
   geoapify_importer.poi_node_creator:
     class: Drupal\geoapify_importer\Service\Poi\PoiNodeCreator
     arguments: ['@entity_type.manager', '@geoapify_importer.coordinate_transformer', '@geoapify_importer.address_verifier', '@logger.channel.geoapify_importer']
 
   geoapify_importer.poi_import_processor:
     class: Drupal\geoapify_importer\Service\Poi\PoiImportProcessor
-    arguments: ['@geoapify_importer.poi_category_mapper', '@geoapify_importer.poi_node_creator', '@geoapify_importer.poi_node_updater', '@geoapify_importer.place_info', '@logger.channel.geoapify_importer']
+    arguments: ['@geoapify_importer.poi_category_mapper', '@geoapify_importer.poi_node_creator', '@geoapify_importer.poi_node_updater', '@geoapify_importer.place_info', '@logger.channel.geoapify_importer', '@geoapify_importer.poi_town_locator']
 
   geoapify_importer.rate_limiter:
     class: Drupal\geoapify_importer\Service\GeoapifyRateLimiter
@@ -73,6 +77,10 @@ services:
 
   geoapify_importer.poi_category_tagger:
     class: Drupal\geoapify_importer\Service\Poi\PoiCategoryTagger
+    arguments: ['@entity_type.manager']
+
+  geoapify_importer.poi_category_mapping_sync:
+    class: Drupal\geoapify_importer\Service\Poi\PoiCategoryMappingSync
     arguments: ['@entity_type.manager']
 
   logger.channel.geoapify_importer:

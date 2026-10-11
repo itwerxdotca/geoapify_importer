@@ -309,6 +309,9 @@ class TownImportRunner {
             // circle fallback), so whatever creates or updates the node, POI
             // or Listing, can connect it to that town.
             'town_tid' => $tid,
+            // 'boundary' or 'circle': a circle search reaches into neighbouring
+            // towns, so the processor re-decides the town for those places.
+            'search_method' => $summary['search_method'],
           ];
 
           $summary[$status]++;
