@@ -9,19 +9,19 @@ use Psr\Log\LoggerInterface;
  * Decides which town a place belongs to.
  *
  * A boundary search is trustworthy: the place is inside the town's boundary,
- * so the town that was searched is the town. A 15 km circle search is not: it
- * reaches into neighbouring towns, and because towns are imported in id order
- * the first hamlet searched claimed every place near it, even places that
- * belong to a different town (a Bamfield dock was filed under the hamlet
- * Aa-at-sow-is). For places found by a circle search the town is therefore
- * the NEAREST town (by distance to the town's coordinates), not the town that
- * happened to be searched. That never depends on the order towns are imported.
+ * so the town that was searched is the town.
  *
- * The town coordinates are read once per process straight from the
- * field_geolocation table of the canadian_towns vocabulary (only rows whose
- * term still exists). Province-level
- * terms have no coordinates and so are never chosen. If the table cannot be
- * read, the searched town is used, as before.
+ * A 15 km circle search is not: it reaches into neighbouring towns, and the
+ * first town searched used to claim every place near it (a Bamfield dock was
+ * filed under the neighbouring locality Aa-at-sow-is). Nearest-centroid is no
+ * better, because the vocabulary holds thousands of tiny localities and would
+ * split cities into hamlets. Instead the place's own address is used: Geoapify
+ * records the city / town / village / hamlet a place sits in, so the place is
+ * filed under the town term of that NAME, in the same province, closest to the
+ * place. Only when no name matches is the searched town used.
+ *
+ * The town index is read once per process from the canadian_towns vocabulary
+ * (only terms that still exist). If it cannot be read, the searched town is used.
  */
 class PoiTownLocator {
 
@@ -33,6 +33,18 @@ class PoiTownLocator {
    * @var array<int, array{0: float, 1: float}>|null
    */
   protected ?array $index = NULL;
+
+  /**
+   * Name index: normalised name => list of [tid, lat, lng, province code].
+   *
+   * @var array<string, array<int, array{0: int, 1: float, 2: float, 3: string}>>|null
+   */
+  protected ?array $names = NULL;
+
+  /**
+   * Furthest a name match may be from the place, in metres.
+   */
+  protected const MAX_NAME_DISTANCE = 30000.0;
 
   public function __construct(
     protected Connection $database,
@@ -57,8 +69,100 @@ class PoiTownLocator {
     if (!is_array($coordinates) || count($coordinates) < 2) {
       return $searched_tid;
     }
-    $nearest = $this->nearest((float) $coordinates[1], (float) $coordinates[0]);
-    return $nearest['tid'] ?? $searched_tid;
+    $match = $this->matchByName($feature['properties'] ?? [], (float) $coordinates[1], (float) $coordinates[0]);
+    return $match ?? $searched_tid;
+  }
+
+  /**
+   * The names a place says it is in, most general first.
+   *
+   * @return string[]
+   *   Display names: city, town, village, hamlet, then the bracketed part of
+   *   the city ("Area A (Bamfield)" gives "Bamfield").
+   */
+  public function candidateNames(array $properties): array {
+    $names = [];
+    foreach (['city', 'town', 'village', 'hamlet'] as $key) {
+      if (!empty($properties[$key]) && is_string($properties[$key])) {
+        $names[] = $properties[$key];
+      }
+    }
+    if (!empty($properties['city']) && is_string($properties['city']) && preg_match('/\(([^)]+)\)/', $properties['city'], $m)) {
+      $names[] = $m[1];
+    }
+    return $names;
+  }
+
+  /**
+   * The town term whose name the place's address gives, or NULL.
+   *
+   * The first candidate name that matches a term in the place's province
+   * within MAX_NAME_DISTANCE wins; of several same-named terms the closest.
+   */
+  public function matchByName(array $properties, float $lat, float $lng): ?int {
+    $names = $this->nameIndex();
+    $province = strtoupper((string) ($properties['state_code'] ?? ''));
+    foreach ($this->candidateNames($properties) as $name) {
+      $best = NULL;
+      foreach ($names[$this->normalise($name)] ?? [] as [$tid, $t_lat, $t_lng, $t_prov]) {
+        if ($province !== '' && $t_prov !== '' && $t_prov !== $province) {
+          continue;
+        }
+        $distance = $this->distance($lat, $lng, $t_lat, $t_lng);
+        if ($distance <= self::MAX_NAME_DISTANCE && ($best === NULL || $distance < $best[1])) {
+          $best = [$tid, $distance];
+        }
+      }
+      if ($best !== NULL) {
+        return $best[0];
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * True when a town's name is one of the names the place's address gives.
+   */
+  public function nameMatches(int $tid, array $properties): bool {
+    $row = $this->index()[$tid] ?? NULL;
+    if ($row === NULL || !isset($row[2])) {
+      return FALSE;
+    }
+    $mine = $this->normalise((string) $row[2]);
+    foreach ($this->candidateNames($properties) as $name) {
+      if ($this->normalise($name) === $mine) {
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  /**
+   * Lower-case, accent-free, punctuation-free form used to compare names.
+   */
+  public function normalise(string $name): string {
+    $name = mb_strtolower($name);
+    if (function_exists('transliterator_transliterate')) {
+      $name = transliterator_transliterate('Any-Latin; Latin-ASCII', $name) ?: $name;
+    }
+    $name = preg_replace('/[^a-z0-9]+/', ' ', $name);
+    $name = preg_replace(['/\bsaint\b/', '/\bsainte\b/', '/\bmount\b/', '/\bfort\b/'], ['st', 'ste', 'mt', 'ft'], $name);
+    return trim(preg_replace('/\s+/', ' ', $name));
+  }
+
+  /**
+   * Builds the name index from the town rows, once.
+   */
+  protected function nameIndex(): array {
+    if ($this->names === NULL) {
+      $this->names = [];
+      foreach ($this->index() as $tid => $row) {
+        if (isset($row[2]) && $row[2] !== '') {
+          $this->names[$this->normalise((string) $row[2])][] = [(int) $tid, $row[0], $row[1], strtoupper((string) ($row[3] ?? ''))];
+        }
+      }
+    }
+    return $this->names;
   }
 
   /**
@@ -114,15 +218,18 @@ class PoiTownLocator {
   }
 
   /**
-   * Reads tid => [lat, lng] for every town that has coordinates.
+   * Reads tid => [lat, lng, name, province code] for every town with coordinates.
    */
   protected function loadRows(): array {
     // Joined to the term table so a leftover location row whose term no longer
     // exists (deleted, or from a rolled-back bulk import) can never be chosen.
     $query = $this->database->select('taxonomy_term__field_geolocation', 'g');
     $query->innerJoin('taxonomy_term_field_data', 'd', 'd.tid = g.entity_id');
+    $query->leftJoin('taxonomy_term__field_province_code', 'p', 'p.entity_id = g.entity_id AND p.deleted = 0');
     $result = $query
       ->fields('g', ['entity_id', 'field_geolocation_lat', 'field_geolocation_lng'])
+      ->fields('d', ['name'])
+      ->fields('p', ['field_province_code_value'])
       ->condition('g.bundle', 'canadian_towns')
       ->condition('g.deleted', 0)
       ->condition('d.vid', 'canadian_towns')
@@ -132,7 +239,12 @@ class PoiTownLocator {
     $rows = [];
     foreach ($result as $row) {
       if ($row->field_geolocation_lat !== NULL && $row->field_geolocation_lng !== NULL) {
-        $rows[(int) $row->entity_id] = [(float) $row->field_geolocation_lat, (float) $row->field_geolocation_lng];
+        $rows[(int) $row->entity_id] = [
+          (float) $row->field_geolocation_lat,
+          (float) $row->field_geolocation_lng,
+          (string) $row->name,
+          (string) $row->field_province_code_value,
+        ];
       }
     }
     return $rows;
