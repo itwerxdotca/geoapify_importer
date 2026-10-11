@@ -18,7 +18,8 @@ use Psr\Log\LoggerInterface;
  * split cities into hamlets. Instead the place's own address is used: Geoapify
  * records the city / town / village / hamlet a place sits in, so the place is
  * filed under the town term of that NAME, in the same province, closest to the
- * place. Only when no name matches is the searched town used.
+ * place (city / town / village first; then the most specific hamlet name; then
+ * a municipality). Only when no name matches is the searched town used.
  *
  * The town index is read once per process from the canadian_towns vocabulary
  * (only terms that still exist). If it cannot be read, the searched town is used.
@@ -37,7 +38,7 @@ class PoiTownLocator {
   /**
    * Name index: normalised name => list of [tid, lat, lng, province code].
    *
-   * @var array<string, array<int, array{0: int, 1: float, 2: float, 3: string}>>|null
+   * @var array<string, array<int, array{0: int, 1: float, 2: float, 3: string, 4: string}>>|null
    */
   protected ?array $names = NULL;
 
@@ -74,7 +75,7 @@ class PoiTownLocator {
   }
 
   /**
-   * The names a place says it is in, most general first.
+   * The names a place says it is in.
    *
    * @return string[]
    *   Display names: city, town, village, hamlet, then the bracketed part of
@@ -96,28 +97,57 @@ class PoiTownLocator {
   /**
    * The town term whose name the place's address gives, or NULL.
    *
-   * The first candidate name that matches a term in the place's province
-   * within MAX_NAME_DISTANCE wins; of several same-named terms the closest.
+   * Geoapify's "city" is often a whole amalgamated municipality (Pontiac,
+   * Mississippi Mills, Lambton Shores) while the visitor expects the village
+   * (Quyon, Almonte, Forest). So, in order:
+   *  1. the city name, if it is a real city, town or village term;
+   *  2. the town, village, hamlet and bracketed names (most specific place);
+   *  3. the city name, whatever its type (e.g. a municipality).
+   * A term must be in the place's province (or within 10 km, for cities that
+   * straddle a border such as Lloydminster) and within MAX_NAME_DISTANCE; of
+   * several same-named terms the closest wins.
    */
   public function matchByName(array $properties, float $lat, float $lng): ?int {
-    $names = $this->nameIndex();
-    $province = strtoupper((string) ($properties['state_code'] ?? ''));
-    foreach ($this->candidateNames($properties) as $name) {
-      $best = NULL;
-      foreach ($names[$this->normalise($name)] ?? [] as [$tid, $t_lat, $t_lng, $t_prov]) {
-        if ($province !== '' && $t_prov !== '' && $t_prov !== $province) {
-          continue;
-        }
-        $distance = $this->distance($lat, $lng, $t_lat, $t_lng);
-        if ($distance <= self::MAX_NAME_DISTANCE && ($best === NULL || $distance < $best[1])) {
-          $best = [$tid, $distance];
-        }
+    $city = (!empty($properties['city']) && is_string($properties['city'])) ? [$properties['city']] : [];
+    $others = array_values(array_diff($this->candidateNames($properties), $city));
+
+    foreach ($city as $name) {
+      if (($tid = $this->findTerm($name, $properties, $lat, $lng, ['City', 'Town', 'Village'])) !== NULL) {
+        return $tid;
       }
-      if ($best !== NULL) {
-        return $best[0];
+    }
+    foreach ($others as $name) {
+      if (($tid = $this->findTerm($name, $properties, $lat, $lng)) !== NULL) {
+        return $tid;
+      }
+    }
+    foreach ($city as $name) {
+      if (($tid = $this->findTerm($name, $properties, $lat, $lng)) !== NULL) {
+        return $tid;
       }
     }
     return NULL;
+  }
+
+  /**
+   * The closest term with this name (optionally of given types), or NULL.
+   */
+  protected function findTerm(string $name, array $properties, float $lat, float $lng, ?array $types = NULL): ?int {
+    $province = strtoupper((string) ($properties['state_code'] ?? ''));
+    $best = NULL;
+    foreach ($this->nameIndex()[$this->normalise($name)] ?? [] as [$tid, $t_lat, $t_lng, $t_prov, $t_type]) {
+      if ($types !== NULL && !in_array($t_type, $types, TRUE)) {
+        continue;
+      }
+      $distance = $this->distance($lat, $lng, $t_lat, $t_lng);
+      if ($province !== '' && $t_prov !== '' && $t_prov !== $province && $distance > 10000.0) {
+        continue;
+      }
+      if ($distance <= self::MAX_NAME_DISTANCE && ($best === NULL || $distance < $best[1])) {
+        $best = [$tid, $distance];
+      }
+    }
+    return $best[0] ?? NULL;
   }
 
   /**
@@ -158,7 +188,7 @@ class PoiTownLocator {
       $this->names = [];
       foreach ($this->index() as $tid => $row) {
         if (isset($row[2]) && $row[2] !== '') {
-          $this->names[$this->normalise((string) $row[2])][] = [(int) $tid, $row[0], $row[1], strtoupper((string) ($row[3] ?? ''))];
+          $this->names[$this->normalise((string) $row[2])][] = [(int) $tid, $row[0], $row[1], strtoupper((string) ($row[3] ?? '')), (string) ($row[4] ?? '')];
         }
       }
     }
@@ -218,7 +248,7 @@ class PoiTownLocator {
   }
 
   /**
-   * Reads tid => [lat, lng, name, province code] for every town with coordinates.
+   * Reads tid => [lat, lng, name, province code, type] for every town with coordinates.
    */
   protected function loadRows(): array {
     // Joined to the term table so a leftover location row whose term no longer
@@ -226,10 +256,12 @@ class PoiTownLocator {
     $query = $this->database->select('taxonomy_term__field_geolocation', 'g');
     $query->innerJoin('taxonomy_term_field_data', 'd', 'd.tid = g.entity_id');
     $query->leftJoin('taxonomy_term__field_province_code', 'p', 'p.entity_id = g.entity_id AND p.deleted = 0');
+    $query->leftJoin('taxonomy_term__field_type', 't', 't.entity_id = g.entity_id AND t.deleted = 0');
     $result = $query
       ->fields('g', ['entity_id', 'field_geolocation_lat', 'field_geolocation_lng'])
       ->fields('d', ['name'])
       ->fields('p', ['field_province_code_value'])
+      ->fields('t', ['field_type_value'])
       ->condition('g.bundle', 'canadian_towns')
       ->condition('g.deleted', 0)
       ->condition('d.vid', 'canadian_towns')
@@ -244,6 +276,7 @@ class PoiTownLocator {
           (float) $row->field_geolocation_lng,
           (string) $row->name,
           (string) $row->field_province_code_value,
+          (string) $row->field_type_value,
         ];
       }
     }
