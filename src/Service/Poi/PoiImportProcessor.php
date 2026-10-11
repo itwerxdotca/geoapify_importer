@@ -124,6 +124,14 @@ class PoiImportProcessor {
         continue;
       }
 
+      // The importer searches within 15 km of a town, which near the border
+      // reaches into the United States. Those places are not Canadian POIs.
+      $country = strtolower((string) ($entry['feature']['properties']['country_code'] ?? 'ca'));
+      if ($country !== '' && $country !== 'ca') {
+        $counts['ignored']++;
+        continue;
+      }
+
       try {
         $categories = $entry['feature']['properties']['categories'] ?? [];
         $mapped = $this->mapper->map($categories);

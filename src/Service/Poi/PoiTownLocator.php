@@ -82,8 +82,35 @@ class PoiTownLocator {
    *   the city ("Area A (Bamfield)" gives "Bamfield").
    */
   public function candidateNames(array $properties): array {
+    return array_values(array_unique(array_merge(
+      $this->cityNames($properties),
+      $this->specificNames($properties),
+      $this->suburbNames($properties),
+    )));
+  }
+
+  /**
+   * The city name, with and without its municipal prefix ("Township of Langley" gives "Langley").
+   *
+   * @return string[]
+   */
+  protected function cityNames(array $properties): array {
+    if (empty($properties['city']) || !is_string($properties['city'])) {
+      return [];
+    }
+    $city = $properties['city'];
+    $stripped = trim(preg_replace('/^(?:Rural Municipality|Regional Municipality|Municipal District|Municipality|Township|City|Town|Village|District|County|Borough|Canton|Ville|Municipalit\X{00E9}|Municipalite)\s+(?:of|de|d\')\s*/iu', '', $city));
+    return array_values(array_unique(array_filter([$stripped, $city])));
+  }
+
+  /**
+   * The town, village, hamlet and bracketed names.
+   *
+   * @return string[]
+   */
+  protected function specificNames(array $properties): array {
     $names = [];
-    foreach (['city', 'town', 'village', 'hamlet'] as $key) {
+    foreach (['town', 'village', 'hamlet'] as $key) {
       if (!empty($properties[$key]) && is_string($properties[$key])) {
         $names[] = $properties[$key];
       }
@@ -95,6 +122,15 @@ class PoiTownLocator {
   }
 
   /**
+   * The suburb name, the weakest evidence (a neighbourhood of a bigger place).
+   *
+   * @return string[]
+   */
+  protected function suburbNames(array $properties): array {
+    return (!empty($properties['suburb']) && is_string($properties['suburb'])) ? [$properties['suburb']] : [];
+  }
+
+  /**
    * The town term whose name the place's address gives, or NULL.
    *
    * Geoapify's "city" is often a whole amalgamated municipality (Pontiac,
@@ -102,26 +138,21 @@ class PoiTownLocator {
    * (Quyon, Almonte, Forest). So, in order:
    *  1. the city name, if it is a real city, town or village term;
    *  2. the town, village, hamlet and bracketed names (most specific place);
-   *  3. the city name, whatever its type (e.g. a municipality).
-   * A term must be in the place's province (or within 10 km, for cities that
+   *  3. the city name, whatever its type (e.g. a municipality);
+   *  4. the suburb name (e.g. Murrayville, for a Township of Langley place).
+   * Municipal prefixes are ignored ("Township of Langley" is Langley). A term
+   * must be in the place's province (or within 10 km, for cities that
    * straddle a border such as Lloydminster) and within MAX_NAME_DISTANCE; of
    * several same-named terms the closest wins.
    */
   public function matchByName(array $properties, float $lat, float $lng): ?int {
-    $city = (!empty($properties['city']) && is_string($properties['city'])) ? [$properties['city']] : [];
-    $others = array_values(array_diff($this->candidateNames($properties), $city));
-
+    $city = $this->cityNames($properties);
     foreach ($city as $name) {
       if (($tid = $this->findTerm($name, $properties, $lat, $lng, ['City', 'Town', 'Village'])) !== NULL) {
         return $tid;
       }
     }
-    foreach ($others as $name) {
-      if (($tid = $this->findTerm($name, $properties, $lat, $lng)) !== NULL) {
-        return $tid;
-      }
-    }
-    foreach ($city as $name) {
+    foreach (array_merge($this->specificNames($properties), $city, $this->suburbNames($properties)) as $name) {
       if (($tid = $this->findTerm($name, $properties, $lat, $lng)) !== NULL) {
         return $tid;
       }
