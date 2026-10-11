@@ -76,9 +76,37 @@ class AddressVerifier {
    *   The geoapify_importer logger channel.
    */
   public function __construct(GeoapifyClient $client, ConfigFactoryInterface $config_factory, LoggerInterface $logger) {
-	$this->client = $client;
-	$this->configFactory = $config_factory;
-	$this->logger = $logger;
+  $this->client = $client;
+  $this->configFactory = $config_factory;
+  $this->logger = $logger;
+  }
+
+  /**
+   * The street address for field_poi_address from the Places data, or NULL.
+   *
+   * Used when the record has a street and a valid Canadian postal code. The
+   * house number is included when there is one, but is not required: most
+   * parks, docks and monuments sit on a street without a number. Province and
+   * town are NOT part of the address (the town vocabulary supplies them). The
+   * Address field needs both address line 1 and a postal code, so a street
+   * without a valid postcode (or the reverse) gives NULL rather than a value
+   * that would block an editor's later save.
+   *
+   * No API call is made.
+   *
+   * @return array{country_code: string, address_line1: string, postal_code: string}|null
+   */
+  public static function placesAddress(array $properties): ?array {
+    $street = trim((string) ($properties['street'] ?? ''));
+    $postcode = strtoupper(trim((string) ($properties['postcode'] ?? '')));
+    if ($street === '' || !preg_match('/^([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z])[ -]?(\d[ABCEGHJ-NPRSTV-Z]\d)$/', $postcode, $m)) {
+      return NULL;
+    }
+    return [
+      'country_code' => 'CA',
+      'address_line1' => trim(trim((string) ($properties['housenumber'] ?? '')) . ' ' . $street),
+      'postal_code' => $m[1] . ' ' . $m[2],
+    ];
   }
 
   /**
@@ -97,82 +125,82 @@ class AddressVerifier {
    *     (e.g. the housenumber/street seen, if a fallback call was made).
    */
   public function verify(array $properties): array {
-	// Fast path: Places API already gave us a genuine civic address.
-	if (!empty($properties['housenumber']) && !empty($properties['street'])) {
-	  return [
-		'status' => self::STATUS_VERIFIED,
-		'method' => 'places_api',
-		'details' => [
-		  'housenumber' => $properties['housenumber'],
-		  'street' => $properties['street'],
-		],
-	  ];
-	}
+  // Fast path: Places API already gave us a genuine civic address.
+  if (!empty($properties['housenumber']) && !empty($properties['street'])) {
+    return [
+    'status' => self::STATUS_VERIFIED,
+    'method' => 'places_api',
+    'details' => [
+      'housenumber' => $properties['housenumber'],
+      'street' => $properties['street'],
+    ],
+    ];
+  }
 
-	$config = $this->configFactory->get('geoapify_importer.settings');
-	$fallback_enabled = (bool) $config->get('reverse_geocode_enabled');
+  $config = $this->configFactory->get('geoapify_importer.settings');
+  $fallback_enabled = (bool) $config->get('reverse_geocode_enabled');
 
-	if (!$fallback_enabled) {
-	  return [
-		'status' => self::STATUS_UNVERIFIED,
-		'method' => 'fallback_disabled',
-		'details' => [],
-	  ];
-	}
+  if (!$fallback_enabled) {
+    return [
+    'status' => self::STATUS_UNVERIFIED,
+    'method' => 'fallback_disabled',
+    'details' => [],
+    ];
+  }
 
-	$lat = $properties['lat'] ?? NULL;
-	$lon = $properties['lon'] ?? NULL;
+  $lat = $properties['lat'] ?? NULL;
+  $lon = $properties['lon'] ?? NULL;
 
-	if ($lat === NULL || $lon === NULL) {
-	  $this->logger->warning('Cannot run reverse-geocode fallback: missing lat/lon in properties for place_id @place_id.', [
-		'@place_id' => $properties['place_id'] ?? 'unknown',
-	  ]);
+  if ($lat === NULL || $lon === NULL) {
+    $this->logger->warning('Cannot run reverse-geocode fallback: missing lat/lon in properties for place_id @place_id.', [
+    '@place_id' => $properties['place_id'] ?? 'unknown',
+    ]);
 
-	  return [
-		'status' => self::STATUS_UNVERIFIED,
-		'method' => 'reverse_geocode_error',
-		'details' => ['error' => 'missing_coordinates'],
-	  ];
-	}
+    return [
+    'status' => self::STATUS_UNVERIFIED,
+    'method' => 'reverse_geocode_error',
+    'details' => ['error' => 'missing_coordinates'],
+    ];
+  }
 
-	try {
-	  $reverse_result = $this->client->reverseGeocode((float) $lat, (float) $lon);
-	}
-	catch (\RuntimeException $e) {
-	  $this->logger->error('Reverse-geocode fallback request failed for place_id @place_id: @message', [
-		'@place_id' => $properties['place_id'] ?? 'unknown',
-		'@message' => $e->getMessage(),
-	  ]);
+  try {
+    $reverse_result = $this->client->reverseGeocode((float) $lat, (float) $lon);
+  }
+  catch (\RuntimeException $e) {
+    $this->logger->error('Reverse-geocode fallback request failed for place_id @place_id: @message', [
+    '@place_id' => $properties['place_id'] ?? 'unknown',
+    '@message' => $e->getMessage(),
+    ]);
 
-	  return [
-		'status' => self::STATUS_UNVERIFIED,
-		'method' => 'reverse_geocode_error',
-		'details' => ['error' => $e->getMessage()],
-	  ];
-	}
+    return [
+    'status' => self::STATUS_UNVERIFIED,
+    'method' => 'reverse_geocode_error',
+    'details' => ['error' => $e->getMessage()],
+    ];
+  }
 
-	$result_housenumber = $reverse_result['results'][0]['housenumber'] ?? NULL;
-	$result_street = $reverse_result['results'][0]['street'] ?? NULL;
+  $result_housenumber = $reverse_result['results'][0]['housenumber'] ?? NULL;
+  $result_street = $reverse_result['results'][0]['street'] ?? NULL;
 
-	$status = (!empty($result_housenumber) && !empty($result_street))
-	  ? self::STATUS_VERIFIED
-	  : self::STATUS_UNVERIFIED;
+  $status = (!empty($result_housenumber) && !empty($result_street))
+    ? self::STATUS_VERIFIED
+    : self::STATUS_UNVERIFIED;
 
-	$this->logger->info('Reverse-geocode fallback for place_id @place_id: housenumber=@housenumber street=@street -> @status', [
-	  '@place_id' => $properties['place_id'] ?? 'unknown',
-	  '@housenumber' => $result_housenumber ?? 'null',
-	  '@street' => $result_street ?? 'null',
-	  '@status' => $status,
-	]);
+  $this->logger->info('Reverse-geocode fallback for place_id @place_id: housenumber=@housenumber street=@street -> @status', [
+    '@place_id' => $properties['place_id'] ?? 'unknown',
+    '@housenumber' => $result_housenumber ?? 'null',
+    '@street' => $result_street ?? 'null',
+    '@status' => $status,
+  ]);
 
-	return [
-	  'status' => $status,
-	  'method' => 'reverse_geocode',
-	  'details' => [
-		'housenumber' => $result_housenumber,
-		'street' => $result_street,
-	  ],
-	];
+  return [
+    'status' => $status,
+    'method' => 'reverse_geocode',
+    'details' => [
+    'housenumber' => $result_housenumber,
+    'street' => $result_street,
+    ],
+  ];
   }
 
 }
