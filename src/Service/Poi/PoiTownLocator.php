@@ -142,7 +142,12 @@ class PoiTownLocator {
       return NULL;
     }
     $in = ['state_code' => $csd['province']];
-    $municipality = $this->findTerm($this->cleanMunicipalityName($csd['name']), $in, $lat, $lng);
+    $municipality = NULL;
+    foreach ($this->municipalityNames($csd['name']) as $candidate) {
+      if (($municipality = $this->findTerm($candidate, $in, $lat, $lng)) !== NULL) {
+        break;
+      }
+    }
     if ($municipality !== NULL && in_array($csd['type'], self::CITY_LIKE, TRUE)) {
       return ['tid' => $municipality, 'how' => 'municipality', 'municipality' => $csd['name']];
     }
@@ -184,10 +189,22 @@ class PoiTownLocator {
   }
 
   /**
-   * "Lloydminster (Part)" is "Lloydminster".
+   * The names a municipality can be looked up by.
+   *
+   * Statistics Canada writes some as "Greater Sudbury / Grand Sudbury" (each
+   * language) and some with a suffix: "Lloydminster (Part)".
+   *
+   * @return string[]
    */
-  protected function cleanMunicipalityName(string $name): string {
-    return trim(preg_replace('/\s*\([^)]*\)\s*$/u', '', $name));
+  protected function municipalityNames(string $name): array {
+    $names = [];
+    foreach (preg_split('/\s+\/\s+/u', $name) as $part) {
+      $clean = trim(preg_replace('/\s*\([^)]*\)\s*$/u', '', $part));
+      if ($clean !== '') {
+        $names[] = $clean;
+      }
+    }
+    return array_values(array_unique($names));
   }
 
   /**
