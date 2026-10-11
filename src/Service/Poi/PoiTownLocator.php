@@ -18,7 +18,8 @@ use Psr\Log\LoggerInterface;
  * happened to be searched. That never depends on the order towns are imported.
  *
  * The town coordinates are read once per process straight from the
- * field_geolocation table of the canadian_towns vocabulary. Province-level
+ * field_geolocation table of the canadian_towns vocabulary (only rows whose
+ * term still exists). Province-level
  * terms have no coordinates and so are never chosen. If the table cannot be
  * read, the searched town is used, as before.
  */
@@ -116,10 +117,16 @@ class PoiTownLocator {
    * Reads tid => [lat, lng] for every town that has coordinates.
    */
   protected function loadRows(): array {
-    $result = $this->database->select('taxonomy_term__field_geolocation', 'g')
+    // Joined to the term table so a leftover location row whose term no longer
+    // exists (deleted, or from a rolled-back bulk import) can never be chosen.
+    $query = $this->database->select('taxonomy_term__field_geolocation', 'g');
+    $query->innerJoin('taxonomy_term_field_data', 'd', 'd.tid = g.entity_id');
+    $result = $query
       ->fields('g', ['entity_id', 'field_geolocation_lat', 'field_geolocation_lng'])
       ->condition('g.bundle', 'canadian_towns')
       ->condition('g.deleted', 0)
+      ->condition('d.vid', 'canadian_towns')
+      ->condition('d.default_langcode', 1)
       ->execute();
 
     $rows = [];
