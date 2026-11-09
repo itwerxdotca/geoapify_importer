@@ -99,6 +99,7 @@ function geoapify_importer_update_10001() {
  */
 function geoapify_importer_install() {
   _geoapify_importer_create_detail_fields();
+  _geoapify_importer_create_listing_fields();
 }
 
 /**
@@ -194,6 +195,133 @@ function _geoapify_importer_create_detail_fields(): array {
         'translatable' => FALSE,
       ])->save();
       $created[] = 'field_geoapify_facilities';
+    }
+  }
+
+  return $created;
+}
+
+
+/**
+ * Creates the Listing import fields: opening hours, and the Geoapify mapping
+ * fields on the listing_category and amenities vocabularies.
+ */
+function geoapify_importer_update_10003() {
+  $created = _geoapify_importer_create_listing_fields();
+  return t('Created: @fields', ['@fields' => $created ? implode(', ', $created) : 'nothing (all already present)']);
+}
+
+/**
+ * Creates what the Listing importer needs. Safe to run more than once.
+ *
+ * - field_listing_hours on listing: Office Hours field (needs the
+ *   office_hours module; skipped if it is not enabled).
+ * - field_geoapify_categories on listing_category: which Geoapify category
+ *   strings a Listing category matches (the storage is shared with the POI
+ *   category field).
+ * - field_geoapify_facilities on amenities: which Geoapify facility names
+ *   mean a Listing has that amenity (storage shared with poi_amenities).
+ * - Museums and Cinemas terms under Arts & Culture, which had no home.
+ *
+ * Returns the names of what it created.
+ */
+function _geoapify_importer_create_listing_fields(): array {
+  $created = [];
+
+  if (\Drupal::entityTypeManager()->getStorage('node_type')->load('listing') === NULL) {
+    return $created;
+  }
+
+  // Opening hours (Office Hours module).
+  if (\Drupal::moduleHandler()->moduleExists('office_hours')) {
+    if (FieldStorageConfig::loadByName('node', 'field_listing_hours') === NULL) {
+      FieldStorageConfig::create([
+        'field_name' => 'field_listing_hours',
+        'entity_type' => 'node',
+        'type' => 'office_hours',
+        'cardinality' => -1,
+        'translatable' => FALSE,
+      ])->save();
+    }
+    if (FieldConfig::loadByName('node', 'listing', 'field_listing_hours') === NULL) {
+      FieldConfig::create([
+        'field_name' => 'field_listing_hours',
+        'entity_type' => 'node',
+        'bundle' => 'listing',
+        'label' => 'Opening Hours',
+        'required' => FALSE,
+        'translatable' => FALSE,
+      ])->save();
+      $created[] = 'field_listing_hours';
+    }
+  }
+
+  // Category mapping on listing_category.
+  if (\Drupal\taxonomy\Entity\Vocabulary::load('listing_category') !== NULL) {
+    if (FieldStorageConfig::loadByName('taxonomy_term', 'field_geoapify_categories') === NULL) {
+      FieldStorageConfig::create([
+        'field_name' => 'field_geoapify_categories',
+        'entity_type' => 'taxonomy_term',
+        'type' => 'string',
+        'cardinality' => -1,
+        'settings' => ['max_length' => 255, 'is_ascii' => FALSE, 'case_sensitive' => FALSE],
+        'translatable' => TRUE,
+      ])->save();
+    }
+    if (FieldConfig::loadByName('taxonomy_term', 'listing_category', 'field_geoapify_categories') === NULL) {
+      FieldConfig::create([
+        'field_name' => 'field_geoapify_categories',
+        'entity_type' => 'taxonomy_term',
+        'bundle' => 'listing_category',
+        'label' => 'Geoapify Categories',
+        'description' => 'Geoapify category strings this term should match. A trailing .* matches everything under that category.',
+        'required' => FALSE,
+        'translatable' => FALSE,
+      ])->save();
+      $created[] = 'listing_category.field_geoapify_categories';
+    }
+
+    // Museums and Cinemas had no Listing category; add them under Arts & Culture.
+    $term_storage = \Drupal::entityTypeManager()->getStorage('taxonomy_term');
+    $parents = $term_storage->loadByProperties(['vid' => 'listing_category', 'name' => 'Arts & Culture']);
+    $parent = $parents ? reset($parents) : NULL;
+    if ($parent) {
+      foreach (['Museums', 'Cinemas'] as $name) {
+        if (!$term_storage->loadByProperties(['vid' => 'listing_category', 'name' => $name])) {
+          $term_storage->create([
+            'vid' => 'listing_category',
+            'name' => $name,
+            'parent' => [$parent->id()],
+          ])->save();
+          $created[] = 'term ' . $name;
+        }
+      }
+    }
+  }
+
+  // Facility mapping on amenities.
+  if (\Drupal\taxonomy\Entity\Vocabulary::load('amenities') !== NULL) {
+    if (FieldStorageConfig::loadByName('taxonomy_term', 'field_geoapify_facilities') === NULL) {
+      FieldStorageConfig::create([
+        'field_name' => 'field_geoapify_facilities',
+        'entity_type' => 'taxonomy_term',
+        'type' => 'string',
+        'cardinality' => -1,
+        'settings' => ['max_length' => 255, 'is_ascii' => FALSE, 'case_sensitive' => FALSE],
+        'translatable' => TRUE,
+      ])->save();
+    }
+    if (FieldConfig::loadByName('taxonomy_term', 'amenities', 'field_geoapify_facilities') === NULL) {
+      FieldConfig::create([
+        'field_name' => 'field_geoapify_facilities',
+        'entity_type' => 'taxonomy_term',
+        'bundle' => 'amenities',
+        'label' => 'Geoapify Facilities',
+        'description' => 'Geoapify facility names (for example wheelchair) that mean a business has this amenity. One value per name.',
+        'required' => FALSE,
+        'translatable' => FALSE,
+      ])->save();
+      $created[] = 'amenities.field_geoapify_facilities';
     }
   }
 
